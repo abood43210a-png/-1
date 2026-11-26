@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:sqflite/sqflite.dart';
 import 'main.dart';
+import 'messaging.dart';
 
 bool _ready = false;
 
@@ -163,6 +163,13 @@ class _InvoicePageState extends State<InvoicePage> {
     });
     if (!mounted) return;
     snack(context, 'تم حفظ الفاتورة رقم $invId');
+    await afterSave(context, partyId, 'invoice', {
+      'kind': sale ? 'فاتورة بيع' : 'فاتورة شراء',
+      'no': '$invId',
+      'amount': money(n, cur),
+      'rest': money(n - pd, cur),
+    });
+    if (!mounted) return;
     Navigator.pop(context);
   }
 
@@ -448,9 +455,6 @@ class _BalancesPageState extends State<BalancesPage> {
     return true;
   }
 
-  String message(Map<String, Object?> a) =>
-      'المحاسب\nحساب: ${a['name']}\nرصيدكم الحالي: ${balText(bal[a['id'] as int])}\nنرجو المراجعة والتسديد.';
-
   Widget chip(String label, String f) => ChoiceChip(
       label: Text(label), selected: filter == f, onSelected: (_) => setState(() => filter = f));
 
@@ -543,11 +547,8 @@ class _BalancesPageState extends State<BalancesPage> {
                                 fontWeight: FontWeight.bold, color: balColor(m))),
                       ),
                       IconButton(
-                          icon: const Icon(Icons.copy, color: blue),
-                          onPressed: () {
-                            Clipboard.setData(ClipboardData(text: message(a)));
-                            snack(context, 'تم نسخ رسالة المطالبة');
-                          }),
+                          icon: const Icon(Icons.message, color: blue),
+                          onPressed: () => sendBalanceMsg(context, id)),
                     ]),
                     onTap: () async {
                       await Navigator.push(
