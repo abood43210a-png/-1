@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
+import 'extras.dart';
 
 late Database db;
 Map<int, Map<String, Object?>> curs = {};
@@ -229,6 +230,9 @@ class _HomeState extends State<Home> {
             quick('كشف حساب', const PickAccountPage()),
             quick('الحركة اليومية', const DailyPage(), orange),
             quick('العملات', const CurrenciesPage(), orange),
+            quick('فاتورة جديدة', const InvoicePage()),
+            quick('الفواتير', const InvoicesPage()),
+            quick('أرصدة الحسابات', const BalancesPage(), orange),
           ]),
           const SizedBox(height: 12),
           GridView.count(
