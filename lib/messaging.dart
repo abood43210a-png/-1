@@ -1,49 +1,94 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'main.dart';
 
 const tplNames = {
-  'voucher': 'رسالة السند',
-  'balance': 'رسالة الرصيد / المطالبة',
-  'invoice': 'رسالة الفاتورة',
+  'voucher_dr': 'إشعار دائن (سند عليه)',
+  'voucher_cr': 'إشعار مدين (سند له)',
+  'invoice': 'إشعار الفاتورة',
+  'balance': 'إشعار الرصيد / المطالبة',
 };
 
 const defTpl = {
-  'voucher': 'المحاسب\nحساب: {name}\n{side} مبلغ {amount}\n{note}\nالرصيد: {balance}',
-  'balance': 'المحاسب\nحساب: {name}\nرصيدكم الحالي: {balance}\nنرجو المراجعة والتسديد.',
+  'voucher_dr': 'اشعار دائن\n{app}\nعليكم مبلغ {amount}\n{note}\nالرصيد {balance}',
+  'voucher_cr': 'اشعار مدين\n{app}\nلكم مبلغ {amount}\n{note}\nالرصيد {balance}',
   'invoice':
-      'المحاسب\nحساب: {name}\n{kind} رقم {no}\nالإجمالي: {amount}\nالمتبقي: {rest}\nالرصيد: {balance}',
+      '{app}\n{kind} رقم {no}\nحساب: {name}\nالإجمالي: {amount}\nالمتبقي: {rest}\nالرصيد {balance}',
+  'balance': '{app}\nحساب: {name}\nالرصيد {balance}\nنرجو المراجعة والتسديد.',
 };
 
 const tplHelp =
-    '{name} اسم الحساب   {amount} المبلغ   {side} عليكم/لكم   {note} البيان   {balance} الرصيد   {date} التاريخ   {kind} نوع الفاتورة   {no} رقم الفاتورة   {rest} المتبقي';
+    '{app} اسم البرنامج   {name} اسم الحساب   {amount} المبلغ   {note} البيان   {balance} الرصيد   {date} التاريخ   {kind} نوع الفاتورة   {no} الرقم   {rest} المتبقي';
 
-Future<String> getTpl(String k) async {
+// ---------- الإعدادات ----------
+
+Future<void> _ensureSettings() =>
+    db.execute('CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)');
+
+Future<String> getSetting(String k, String def) async {
+  await _ensureSettings();
   final r = await db.query('settings', where: 'k=?', whereArgs: [k]);
-  return r.isEmpty ? defTpl[k]! : r.first['v'] as String;
+  return r.isEmpty ? def : r.first['v'] as String;
 }
 
-Future<void> setTpl(String k, String v) async {
+Future<void> setSetting(String k, String v) async {
+  await _ensureSettings();
   await db.insert('settings', {'k': k, 'v': v}, conflictAlgorithm: ConflictAlgorithm.replace);
 }
+
+Future<String> getTpl(String k) => getSetting('tpl_$k', defTpl[k]!);
+Future<String> appName() => getSetting('app_name', 'المحاسب');
+
+// ---------- تنسيق ----------
+
+String nf(double v) {
+  final a = v.abs();
+  final whole = (a - a.roundToDouble()).abs() < 0.005;
+  final s = whole ? a.roundToDouble().toStringAsFixed(0) : a.toStringAsFixed(2);
+  final parts = s.split('.');
+  final ip = parts[0].replaceAllMapped(RegExp(r'\B(?=(\d{3})+(?!\d))'), (m) => ',');
+  return '${v < 0 ? '-' : ''}$ip${parts.length > 1 ? '.${parts[1]}' : ''}';
+}
+
+// يحوّل "500.00 ر.ي" إلى "500 ر.ي"
+String pm(String s) {
+  final m = RegExp(r'^\s*([\d.]+)\s*(.*)$').firstMatch(s);
+  if (m == null) return s;
+  final v = double.tryParse(m.group(1)!);
+  if (v == null) return s;
+  return '${nf(v)} ${m.group(2)}'.trim();
+}
+
+String balIn(Map<int, double>? m, int cur) {
+  final v = m?[cur] ?? 0;
+  if (v.abs() < 0.005) return 'عليكم : 0 ${sym(cur)}';
+  return '${v > 0 ? 'عليكم' : 'لكم'} : ${nf(v.abs())} ${sym(cur)}';
+}
+
+String balAll(Map<int, double>? m) {
+  final parts = <String>[];
+  (m ?? <int, double>{}).forEach((c, v) {
+    if (v.abs() >= 0.005) {
+      parts.add('${v > 0 ? 'عليكم' : 'لكم'} : ${nf(v.abs())} ${sym(c)}');
+    }
+  });
+  return parts.isEmpty ? 'عليكم : 0 ${sym(defCur)}' : parts.join(' | ');
+}
+
+String balMsg(Map<int, double>? m) => balAll(m);
 
 String fill(String tpl, Map<String, String> vars) {
   var s = tpl;
   vars.forEach((k, v) => s = s.replaceAll('{$k}', v));
-  s = s.replaceAll(RegExp(r'\{[a-z]+\}'), '');
+  s = s.replaceAll(RegExp(r'\{[a-z_]+\}'), '');
   return s.split('\n').where((l) => l.trim().isNotEmpty).join('\n');
-}
-
-// نص الرصيد كما يُكتب للعميل: عليكم / لكم
-String balMsg(Map<int, double>? m) {
-  if (m == null) return '0';
-  final parts = <String>[];
-  m.forEach((c, v) {
-    if (v.abs() >= 0.005) parts.add('${money(v, c)} ${v > 0 ? 'عليكم' : 'لكم'}');
-  });
-  return parts.isEmpty ? '0' : parts.join(' | ');
 }
 
 String digits(String s) {
@@ -52,6 +97,13 @@ String digits(String s) {
   if (d.length == 9 && d.startsWith('7')) d = '967$d';
   return d;
 }
+
+Set<String> channelsOf(Map<String, Object?> a) => '${a['msg_app'] ?? ''}'
+    .split(',')
+    .where((e) => e == 'sms' || e == 'wa')
+    .toSet();
+
+// ---------- فتح التطبيقات ----------
 
 Future<bool> sendMsg(String app, String phone, String text) async {
   final e = Uri.encodeComponent(text);
@@ -76,26 +128,284 @@ Future<Map<String, Object?>?> accRow(int id) async {
   return r.isEmpty ? null : r.first;
 }
 
-Future<void> deliver(BuildContext context, Map<String, Object?> a, String text) async {
-  final ok =
-      await sendMsg((a['msg_app'] ?? 'sms') as String, (a['phone'] ?? '') as String, text);
-  if (!ok && context.mounted) snack(context, 'تعذر فتح تطبيق الرسائل');
+class _ResumeObserver with WidgetsBindingObserver {
+  final VoidCallback f;
+  _ResumeObserver(this.f);
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) f();
+  }
 }
 
-// إرسال رصيد الحساب (زر الرسالة في البطاقة)
+// ينتظر رجوع المستخدم للتطبيق (بعد إرسال القناة الأولى)
+Future<void> _waitResume() {
+  final c = Completer<void>();
+  late _ResumeObserver o;
+  o = _ResumeObserver(() {
+    WidgetsBinding.instance.removeObserver(o);
+    if (!c.isCompleted) c.complete();
+  });
+  WidgetsBinding.instance.addObserver(o);
+  return c.future.timeout(const Duration(minutes: 5), onTimeout: () {
+    WidgetsBinding.instance.removeObserver(o);
+  });
+}
+
+// ---------- صورة الإشعار ----------
+
+class NoticeData {
+  final String app, title, no, date, name, headline, balance;
+  final List<List<String>> rows;
+  final bool red;
+  NoticeData({
+    required this.app,
+    required this.title,
+    required this.no,
+    required this.date,
+    required this.name,
+    required this.headline,
+    required this.balance,
+    required this.rows,
+    required this.red,
+  });
+}
+
+NoticeData cardFor(String kind, Map<String, String> v) {
+  final now = DateTime.now();
+  final date =
+      '${dmy(now)}  ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+  final note = v['note'] ?? '';
+  switch (kind) {
+    case 'voucher_dr':
+      return NoticeData(
+          app: v['app']!,
+          title: 'اشعار دائن',
+          no: v['no'] ?? '',
+          date: date,
+          name: v['name']!,
+          headline: 'عليكم مبلغ ${v['amount']}',
+          rows: [if (note.isNotEmpty) ['البيان', note]],
+          balance: v['balance']!,
+          red: true);
+    case 'voucher_cr':
+      return NoticeData(
+          app: v['app']!,
+          title: 'اشعار مدين',
+          no: v['no'] ?? '',
+          date: date,
+          name: v['name']!,
+          headline: 'لكم مبلغ ${v['amount']}',
+          rows: [if (note.isNotEmpty) ['البيان', note]],
+          balance: v['balance']!,
+          red: false);
+    case 'invoice':
+      return NoticeData(
+          app: v['app']!,
+          title: '${v['kind']} رقم ${v['no']}',
+          no: v['no'] ?? '',
+          date: date,
+          name: v['name']!,
+          headline: 'الإجمالي ${v['amount']}',
+          rows: [
+            ['المتبقي', v['rest'] ?? '']
+          ],
+          balance: v['balance']!,
+          red: true);
+    default:
+      return NoticeData(
+          app: v['app']!,
+          title: 'كشف رصيد',
+          no: '',
+          date: date,
+          name: v['name']!,
+          headline: 'نرجو المراجعة والتسديد',
+          rows: [],
+          balance: v['balance']!,
+          red: true);
+  }
+}
+
+class NoticeCard extends StatelessWidget {
+  final NoticeData d;
+  const NoticeCard(this.d, {super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = d.red ? const Color(0xFFC62828) : const Color(0xFF2E7D32);
+    return Container(
+      width: 340,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: blue, width: 2)),
+      child: DefaultTextStyle(
+        style: const TextStyle(color: Colors.black87, fontSize: 14),
+        child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Container(
+                color: blue,
+                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+                child: Column(children: [
+                  Text(d.app,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 19, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 2),
+                  Text(d.title,
+                      style: const TextStyle(color: Colors.white, fontSize: 15)),
+                ]),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                    Text(d.no.isEmpty ? '' : 'رقم: ${d.no}'),
+                    Text(d.date),
+                  ]),
+                  const Divider(),
+                  Text('الأخ / ${d.name}',
+                      style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                    decoration: BoxDecoration(
+                        color: accent.withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: accent)),
+                    child: Text(d.headline,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            color: accent, fontSize: 20, fontWeight: FontWeight.bold)),
+                  ),
+                  for (final r in d.rows)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('${r[0]}: ', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        Expanded(child: Text(r[1])),
+                      ]),
+                    ),
+                  const Divider(height: 22),
+                  Text('الرصيد ${d.balance}',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 18),
+                  const Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                    Text('المحاسب: ________'),
+                    Text('المستلم: ________'),
+                  ]),
+                ]),
+              ),
+            ]),
+      ),
+    );
+  }
+}
+
+// يعرض البطاقة لحظة قصيرة ثم يلتقطها كصورة PNG
+class _CaptureDialog extends StatefulWidget {
+  final Widget child;
+  const _CaptureDialog(this.child);
+  @override
+  State<_CaptureDialog> createState() => _CaptureDialogState();
+}
+
+class _CaptureDialogState extends State<_CaptureDialog> {
+  final key = GlobalKey();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => capture());
+  }
+
+  Future<void> capture() async {
+    await Future.delayed(const Duration(milliseconds: 350));
+    String? path;
+    try {
+      final b = key.currentContext!.findRenderObject() as RenderRepaintBoundary;
+      final img = await b.toImage(pixelRatio: 3);
+      final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
+      final f = File(
+          '${Directory.systemTemp.path}/notice_${DateTime.now().millisecondsSinceEpoch}.png');
+      await f.writeAsBytes(bytes!.buffer.asUint8List());
+      path = f.path;
+    } catch (_) {}
+    if (mounted) Navigator.pop(context, path);
+  }
+
+  @override
+  Widget build(BuildContext context) => Dialog(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        insetPadding: const EdgeInsets.all(12),
+        child: Center(
+          child: RepaintBoundary(
+            key: key,
+            child: Container(
+                color: Colors.white,
+                padding: const EdgeInsets.all(10),
+                child: widget.child),
+          ),
+        ),
+      );
+}
+
+Future<String?> renderCard(BuildContext context, NoticeData d) => showDialog<String>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => _CaptureDialog(NoticeCard(d)));
+
+// ---------- الإرسال ----------
+
+Future<void> sendNotice(BuildContext context, Map<String, Object?> a, String kind,
+    Map<String, String> vars) async {
+  final phone = ((a['phone'] ?? '') as String).trim();
+  var ch = channelsOf(a);
+  if (ch.isEmpty) ch = {'sms'};
+  final v = {
+    ...vars,
+    'app': await appName(),
+    'name': a['name'] as String,
+    'date': dmy(DateTime.now()),
+  };
+  final text = fill(await getTpl(kind), v);
+  var first = true;
+  for (final c in ['sms', 'wa']) {
+    if (!ch.contains(c)) continue;
+    if (!first) await _waitResume();
+    first = false;
+    if (!context.mounted) return;
+    if (c == 'sms') {
+      final ok = await sendMsg('sms', phone, text);
+      if (!ok && context.mounted) snack(context, 'تعذر فتح تطبيق الرسائل');
+    } else {
+      final path = await renderCard(context, cardFor(kind, v));
+      var ok = false;
+      if (path != null) {
+        try {
+          await Share.shareXFiles([XFile(path)]);
+          ok = true;
+        } catch (_) {}
+      }
+      if (!ok) await sendMsg('wa', phone, text);
+    }
+  }
+}
+
+// زر الرسالة في بطاقة الحساب وفي أرصدة الحسابات
 Future<void> sendBalanceMsg(BuildContext context, int id) async {
   final a = await accRow(id);
   if (a == null) return;
-  final phone = (a['phone'] ?? '') as String;
-  if (phone.isEmpty) {
+  if (((a['phone'] ?? '') as String).trim().isEmpty) {
     if (context.mounted) snack(context, 'لا يوجد رقم تلفون لهذا الحساب');
     return;
   }
   final bal = (await balances())[id];
-  final text = fill(await getTpl('balance'),
-      {'name': a['name'] as String, 'balance': balMsg(bal), 'date': dmy(DateTime.now())});
   if (!context.mounted) return;
-  await deliver(context, a, text);
+  await sendNotice(context, a, 'balance', {'balance': balAll(bal)});
 }
 
 // بعد حفظ سند أو فاتورة: حسب إعداد الحساب (لا ترسل / بعد التأكيد / تلقائي)
@@ -103,36 +413,42 @@ Future<void> afterSave(
     BuildContext context, int id, String kind, Map<String, String> vars) async {
   final a = await accRow(id);
   if (a == null) return;
-  final phone = (a['phone'] ?? '') as String;
+  final phone = ((a['phone'] ?? '') as String).trim();
   final mode = (a['msg_mode'] ?? 'none') as String;
   if (phone.isEmpty || mode == 'none' || a['cat'] == 'boxes') return;
+  if (channelsOf(a).isEmpty) return;
   if (!context.mounted) return;
   if (mode == 'confirm' &&
-      !await confirm(context, 'تم الحفظ', 'هل تريد إرسال رسالة للعميل؟')) {
+      !await confirm(context, 'تم الحفظ', 'هل تريد إرسال إشعار للعميل؟')) {
     return;
   }
   final bal = (await balances())[id];
-  final text = fill(await getTpl(kind), {
-    ...vars,
-    'name': a['name'] as String,
-    'balance': balMsg(bal),
-    'date': dmy(DateTime.now()),
-  });
+  final cur = int.tryParse(vars['cur'] ?? '');
+  var k = kind;
+  if (kind == 'voucher') k = vars['side'] == 'عليكم' ? 'voucher_dr' : 'voucher_cr';
+  final v = {...vars};
+  v['amount'] = pm(vars['amount'] ?? '');
+  if (vars.containsKey('rest')) v['rest'] = pm(vars['rest']!);
+  v['balance'] = cur != null ? balIn(bal, cur) : balAll(bal);
   if (!context.mounted) return;
-  await deliver(context, a, text);
+  await sendNotice(context, a, k, v);
 }
 
 // إرسال نص حر (كشف الحساب). بدون رقم: يُنسخ النص
 Future<void> sendText(BuildContext context, int id, String text) async {
   final a = await accRow(id);
-  final phone = (a?['phone'] ?? '') as String;
+  final phone = ((a?['phone'] ?? '') as String).trim();
   if (a == null || phone.isEmpty) {
     await Clipboard.setData(ClipboardData(text: text));
     if (context.mounted) snack(context, 'لا يوجد رقم تلفون، تم نسخ النص');
     return;
   }
-  await deliver(context, a, text);
+  final app = channelsOf(a).contains('wa') ? 'wa' : 'sms';
+  final ok = await sendMsg(app, phone, text);
+  if (!ok && context.mounted) snack(context, 'تعذر فتح تطبيق الرسائل');
 }
+
+// ---------- شاشة الإعدادات ----------
 
 class MessagesSettingsPage extends StatefulWidget {
   const MessagesSettingsPage({super.key});
@@ -142,6 +458,7 @@ class MessagesSettingsPage extends StatefulWidget {
 
 class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
   final cs = {for (final k in tplNames.keys) k: TextEditingController()};
+  final appC = TextEditingController();
 
   @override
   void initState() {
@@ -150,6 +467,7 @@ class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
   }
 
   Future<void> load() async {
+    appC.text = await appName();
     for (final k in tplNames.keys) {
       cs[k]!.text = await getTpl(k);
     }
@@ -157,10 +475,12 @@ class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
   }
 
   Future<void> save() async {
+    final n = appC.text.trim();
+    await setSetting('app_name', n.isEmpty ? 'المحاسب' : n);
     for (final k in tplNames.keys) {
-      await setTpl(k, cs[k]!.text);
+      await setSetting('tpl_$k', cs[k]!.text);
     }
-    if (mounted) snack(context, 'تم حفظ القوالب');
+    if (mounted) snack(context, 'تم الحفظ');
   }
 
   void reset() {
@@ -172,8 +492,15 @@ class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('قوالب الرسائل')),
+        appBar: AppBar(title: const Text('الرسائل والإشعارات')),
         body: ListView(padding: const EdgeInsets.all(16), children: [
+          TextField(
+            controller: appC,
+            decoration: const InputDecoration(
+                labelText: 'اسم البرنامج / المحل (يظهر في الرسالة والصورة)',
+                border: OutlineInputBorder()),
+          ),
+          const SizedBox(height: 12),
           const Text(tplHelp, style: TextStyle(fontSize: 12, color: Colors.black54)),
           const SizedBox(height: 8),
           for (final k in tplNames.keys)
@@ -181,8 +508,8 @@ class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
               padding: const EdgeInsets.only(bottom: 12),
               child: TextField(
                 controller: cs[k],
-                maxLines: 6,
-                minLines: 3,
+                maxLines: 7,
+                minLines: 4,
                 decoration: InputDecoration(
                     labelText: tplNames[k], border: const OutlineInputBorder()),
               ),
