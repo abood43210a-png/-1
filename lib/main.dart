@@ -301,7 +301,8 @@ class _AccountFormPageState extends State<AccountFormPage> {
   int? box;
   int cur = defCur;
   bool onHim = true;
-  String app = 'sms', mode = 'none';
+  Set<String> ch = {'sms', 'wa'};
+  String mode = 'auto';
   bool get isBox => widget.cat == 'boxes';
 
   @override
@@ -315,7 +316,7 @@ class _AccountFormPageState extends State<AccountFormPage> {
       ceilC.text = c == null ? '' : c.toString();
       noteC.text = (a['note'] ?? '') as String;
       box = a['box_id'] as int?;
-      app = (a['msg_app'] ?? 'sms') as String;
+      ch = channelsOf(a);
       mode = (a['msg_mode'] ?? 'none') as String;
     }
     db.query('accounts', where: "cat='boxes'").then((r) => setState(() => boxes = r));
@@ -334,7 +335,7 @@ class _AccountFormPageState extends State<AccountFormPage> {
       'ceiling': double.tryParse(ceilC.text),
       'note': noteC.text.trim(),
       'box_id': box,
-      'msg_app': app,
+      'msg_app': ch.join(','),
       'msg_mode': mode,
     };
     if (widget.acc == null) {
@@ -380,22 +381,24 @@ class _AccountFormPageState extends State<AccountFormPage> {
             ),
           if (!isBox) ...[
             const SizedBox(height: 12),
-            const Text('طريقة إرسال الرسائل'),
-            SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(value: 'sms', label: Text('SMS')),
-                ButtonSegment(value: 'wa', label: Text('واتساب')),
-              ],
-              selected: {app},
-              onSelectionChanged: (s) => setState(() => app = s.first),
-            ),
+            const Text('إرسال الإشعارات عبر (اختر واحداً أو الاثنين)'),
+            Wrap(spacing: 8, children: [
+              FilterChip(
+                  label: const Text('SMS'),
+                  selected: ch.contains('sms'),
+                  onSelected: (v) => setState(() => v ? ch.add('sms') : ch.remove('sms'))),
+              FilterChip(
+                  label: const Text('واتساب (صورة)'),
+                  selected: ch.contains('wa'),
+                  onSelected: (v) => setState(() => v ? ch.add('wa') : ch.remove('wa'))),
+            ]),
             const SizedBox(height: 12),
-            const Text('إرسال الرسائل بعد السند والفاتورة'),
+            const Text('وقت الإرسال'),
             SegmentedButton<String>(
               segments: const [
-                ButtonSegment(value: 'none', label: Text('لا ترسل')),
-                ButtonSegment(value: 'confirm', label: Text('بعد التأكيد')),
                 ButtonSegment(value: 'auto', label: Text('تلقائي')),
+                ButtonSegment(value: 'confirm', label: Text('بعد التأكيد')),
+                ButtonSegment(value: 'none', label: Text('لا ترسل')),
               ],
               selected: {mode},
               onSelectionChanged: (s) => setState(() => mode = s.first),
@@ -646,7 +649,12 @@ class _VoucherPageState extends State<VoucherPage> {
       if (!ok) return;
     }
     final rate = cur == defCur ? 1.0 : (double.tryParse(rateC.text) ?? 1.0);
-    await postDoc('voucher', note.text, [
+    final nt = note.text.trim().isNotEmpty
+        ? note.text.trim()
+        : (isBox
+            ? ''
+            : (onHim ? 'باقي حساب ${r['name']}' : 'واصل باقي حساب ${r['name']}'));
+    final docId = await postDoc('voucher', nt, [
       Ln(acct!, cur, onHim ? a : -a, rate),
       Ln(counter!, cur, onHim ? -a : a, rate),
     ]);
@@ -655,7 +663,9 @@ class _VoucherPageState extends State<VoucherPage> {
       await afterSave(context, acct!, 'voucher', {
         'amount': money(a, cur),
         'side': onHim ? 'عليكم' : 'لكم',
-        'note': note.text,
+        'note': nt,
+        'cur': '$cur',
+        'no': '$docId',
       });
     }
     if (mounted) Navigator.pop(context);
@@ -725,7 +735,10 @@ class _VoucherPageState extends State<VoucherPage> {
             controller: amount,
             keyboardType: TextInputType.number,
             decoration: const InputDecoration(labelText: 'المبلغ')),
-        TextField(controller: note, decoration: const InputDecoration(labelText: 'البيان')),
+        TextField(
+            controller: note,
+            decoration: const InputDecoration(
+                labelText: 'البيان (إذا تركته فارغاً يُكتب تلقائياً)')),
         const SizedBox(height: 20),
         FilledButton(onPressed: save, child: const Text('حفظ')),
       ]),
@@ -853,7 +866,7 @@ class _StatementPageState extends State<StatementPage> {
     for (var i = start; i < rows.length; i++) {
       final a = (rows[i]['amount'] as num).toDouble();
       b.write(
-          '${d10(rows[i]['date'] as String)}  ${a > 0 ? 'عليكم' : 'لكم'} ${a.abs().toStringAsFixed(2)}  | ${bals[i].toStringAsFixed(2)}\n');
+          '${d10(rows[i]['date'] as String)}  ${a > 0 ? 'عليكم' : 'لكم'} ${nf(a.abs())}  | ${nf(bals[i])}\n');
     }
     b.write('الرصيد الحالي: ${balMsg(totalBal)}');
     return b.toString();
