@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 import 'extras.dart';
+import 'messaging.dart';
 
 late Database db;
 Map<int, Map<String, Object?>> curs = {};
@@ -24,20 +26,28 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   db = await openDatabase(
     p.join(await getDatabasesPath(), 'accountant2.db'),
-    version: 1,
+    version: 2,
     onCreate: (d, _) async {
       await d.execute(
           'CREATE TABLE currencies(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, symbol TEXT, sell REAL, buy REAL, is_default INTEGER DEFAULT 0)');
       await d.execute(
-          'CREATE TABLE accounts(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, cat TEXT, phone TEXT, ceiling REAL, note TEXT, box_id INTEGER)');
+          "CREATE TABLE accounts(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, cat TEXT, phone TEXT, ceiling REAL, note TEXT, box_id INTEGER, msg_app TEXT DEFAULT 'sms', msg_mode TEXT DEFAULT 'none')");
       await d.execute(
           'CREATE TABLE docs(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, date TEXT, note TEXT)');
       await d.execute(
           'CREATE TABLE lines(id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id INTEGER, account_id INTEGER, currency_id INTEGER, amount REAL, rate REAL, note TEXT)');
+      await d.execute('CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)');
       await d.insert('currencies',
           {'name': 'ريال يمني', 'symbol': 'ر.ي', 'sell': 1.0, 'buy': 1.0, 'is_default': 1});
       await d.insert('accounts', {'name': 'الصندوق الرئيسي', 'cat': 'boxes'});
       await d.insert('accounts', {'name': 'الأرصدة الافتتاحية', 'cat': 'system'});
+    },
+    onUpgrade: (d, oldV, newV) async {
+      if (oldV < 2) {
+        await d.execute("ALTER TABLE accounts ADD COLUMN msg_app TEXT DEFAULT 'sms'");
+        await d.execute("ALTER TABLE accounts ADD COLUMN msg_mode TEXT DEFAULT 'none'");
+        await d.execute('CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)');
+      }
     },
   );
   await loadCurs();
@@ -233,6 +243,7 @@ class _HomeState extends State<Home> {
             quick('فاتورة جديدة', const InvoicePage()),
             quick('الفواتير', const InvoicesPage()),
             quick('أرصدة الحسابات', const BalancesPage(), orange),
+            quick('الرسائل', const MessagesSettingsPage(), orange),
           ]),
           const SizedBox(height: 12),
           GridView.count(
@@ -290,6 +301,7 @@ class _AccountFormPageState extends State<AccountFormPage> {
   int? box;
   int cur = defCur;
   bool onHim = true;
+  String app = 'sms', mode = 'none';
   bool get isBox => widget.cat == 'boxes';
 
   @override
@@ -303,6 +315,8 @@ class _AccountFormPageState extends State<AccountFormPage> {
       ceilC.text = c == null ? '' : c.toString();
       noteC.text = (a['note'] ?? '') as String;
       box = a['box_id'] as int?;
+      app = (a['msg_app'] ?? 'sms') as String;
+      mode = (a['msg_mode'] ?? 'none') as String;
     }
     db.query('accounts', where: "cat='boxes'").then((r) => setState(() => boxes = r));
   }
@@ -320,6 +334,8 @@ class _AccountFormPageState extends State<AccountFormPage> {
       'ceiling': double.tryParse(ceilC.text),
       'note': noteC.text.trim(),
       'box_id': box,
+      'msg_app': app,
+      'msg_mode': mode,
     };
     if (widget.acc == null) {
       final id = await db.insert('accounts', data);
@@ -362,6 +378,29 @@ class _AccountFormPageState extends State<AccountFormPage> {
               ],
               onChanged: (v) => setState(() => box = v),
             ),
+          if (!isBox) ...[
+            const SizedBox(height: 12),
+            const Text('طريقة إرسال الرسائل'),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'sms', label: Text('SMS')),
+                ButtonSegment(value: 'wa', label: Text('واتساب')),
+              ],
+              selected: {app},
+              onSelectionChanged: (s) => setState(() => app = s.first),
+            ),
+            const SizedBox(height: 12),
+            const Text('إرسال الرسائل بعد السند والفاتورة'),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'none', label: Text('لا ترسل')),
+                ButtonSegment(value: 'confirm', label: Text('بعد التأكيد')),
+                ButtonSegment(value: 'auto', label: Text('تلقائي')),
+              ],
+              selected: {mode},
+              onSelectionChanged: (s) => setState(() => mode = s.first),
+            ),
+          ],
           if (widget.acc == null) ...[
             const SizedBox(height: 12),
             const Text('رصيد افتتاحي'),
@@ -458,6 +497,14 @@ class _AccountsPageState extends State<AccountsPage> {
           IconButton(
               icon: const Icon(Icons.edit, color: blue),
               onPressed: () => open(AccountFormPage(widget.cat, acc: r))),
+          if (!isBox) ...[
+            IconButton(
+                icon: const Icon(Icons.call, color: blue),
+                onPressed: phone.isEmpty ? null : () => callPhone(phone)),
+            IconButton(
+                icon: const Icon(Icons.message, color: blue),
+                onPressed: phone.isEmpty ? null : () => sendBalanceMsg(context, id)),
+          ],
           IconButton(
               icon: const Icon(Icons.add_circle, color: blue),
               onPressed: () => open(VoucherPage(acct0: id))),
@@ -603,6 +650,14 @@ class _VoucherPageState extends State<VoucherPage> {
       Ln(acct!, cur, onHim ? a : -a, rate),
       Ln(counter!, cur, onHim ? -a : a, rate),
     ]);
+    if (!mounted) return;
+    if (!isBox) {
+      await afterSave(context, acct!, 'voucher', {
+        'amount': money(a, cur),
+        'side': onHim ? 'عليكم' : 'لكم',
+        'note': note.text,
+      });
+    }
     if (mounted) Navigator.pop(context);
   }
 
@@ -785,6 +840,25 @@ class _StatementPageState extends State<StatementPage> {
         return d.compareTo(fromIso) >= 0 && d.compareTo(toIso) <= 0;
       }).toList();
 
+  String stText() {
+    final rows = shown;
+    var run = prevBal ? prev : 0.0;
+    final bals = <double>[];
+    for (final r in rows) {
+      run += (r['amount'] as num).toDouble();
+      bals.add(run);
+    }
+    final b = StringBuffer('كشف حساب: ${widget.name}\n');
+    final start = rows.length > 30 ? rows.length - 30 : 0;
+    for (var i = start; i < rows.length; i++) {
+      final a = (rows[i]['amount'] as num).toDouble();
+      b.write(
+          '${d10(rows[i]['date'] as String)}  ${a > 0 ? 'عليكم' : 'لكم'} ${a.abs().toStringAsFixed(2)}  | ${bals[i].toStringAsFixed(2)}\n');
+    }
+    b.write('الرصيد الحالي: ${balMsg(totalBal)}');
+    return b.toString();
+  }
+
   Future<void> open(Widget page) async {
     await Navigator.push(context, MaterialPageRoute(builder: (_) => page));
     load();
@@ -836,7 +910,18 @@ class _StatementPageState extends State<StatementPage> {
     }
     final endBal = (prevBal ? prev : 0.0) + debit - credit;
     return Scaffold(
-      appBar: AppBar(title: Text(widget.name)),
+      appBar: AppBar(title: Text(widget.name), actions: [
+        IconButton(
+            icon: const Icon(Icons.copy),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: stText()));
+              snack(context, 'تم نسخ الكشف');
+            }),
+        if (!isBox)
+          IconButton(
+              icon: const Icon(Icons.share),
+              onPressed: () => sendText(context, widget.id, stText())),
+      ]),
       bottomNavigationBar: SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           Container(
