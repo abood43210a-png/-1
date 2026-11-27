@@ -17,15 +17,20 @@ const tplNames = {
 };
 
 const defTpl = {
-  'voucher_dr': 'اشعار دائن\n{app}\nعليكم مبلغ {amount}\n{note}\nالرصيد {balance}',
-  'voucher_cr': 'اشعار مدين\n{app}\nلكم مبلغ {amount}\n{note}\nالرصيد {balance}',
+  'voucher_dr':
+      'اشعار دائن\n{app}\nعليكم مبلغ {amount}\n{note}\nالرصيد {balance}\n{date}\n{close}',
+  'voucher_cr':
+      'اشعار مدين\n{app}\nلكم مبلغ {amount}\n{note}\nالرصيد {balance}\n{date}\n{close}',
   'invoice':
-      '{app}\n{kind} رقم {no}\nحساب: {name}\nالإجمالي: {amount}\nالمتبقي: {rest}\nالرصيد {balance}',
-  'balance': '{app}\nحساب: {name}\nالرصيد {balance}\nنرجو المراجعة والتسديد.',
+      '{app}\n{kind} رقم {no}\nحساب: {name}\nالإجمالي: {amount}\nالمتبقي: {rest}\nالرصيد {balance}\n{date}',
+  'balance': '{app}\nحساب: {name}\nالرصيد {balance}\n{date}\n{close}',
 };
 
+const defCloseOwe = 'نرجو المراجعة والتسديد 😊';
+const defClosePaid = 'شكراً على حسن تعاملكم 😘';
+
 const tplHelp =
-    '{app} اسم البرنامج   {name} اسم الحساب   {amount} المبلغ   {note} البيان   {balance} الرصيد   {date} التاريخ   {kind} نوع الفاتورة   {no} الرقم   {rest} المتبقي';
+    '{app} اسم المحل   {name} اسم الحساب   {amount} المبلغ   {note} البيان   {balance} الرصيد   {date} التاريخ والوقت   {close} عبارة الختام   {kind} نوع الفاتورة   {no} الرقم   {rest} المتبقي';
 
 // ---------- الإعدادات ----------
 
@@ -43,8 +48,10 @@ Future<void> setSetting(String k, String v) async {
   await db.insert('settings', {'k': k, 'v': v}, conflictAlgorithm: ConflictAlgorithm.replace);
 }
 
-Future<String> getTpl(String k) => getSetting('tpl_$k', defTpl[k]!);
+Future<String> getTpl(String k) => getSetting('tpl2_$k', defTpl[k]!);
 Future<String> appName() => getSetting('app_name', 'المحاسب');
+Future<String> closeFor(bool owe) =>
+    getSetting(owe ? 'close_owe' : 'close_paid', owe ? defCloseOwe : defClosePaid);
 
 // ---------- تنسيق ----------
 
@@ -93,7 +100,7 @@ String fill(String tpl, Map<String, String> vars) {
 
 String digits(String s) {
   var d = s.replaceAll(RegExp(r'[^0-9]'), '');
-  // جوال يمني من 9 خانات يبدأ بـ 7: نضيف مفتاح الدولة لواتساب
+  // جوال يمني من 9 خانات يبدأ بـ 7: نضيف مفتاح الدولة
   if (d.length == 9 && d.startsWith('7')) d = '967$d';
   return d;
 }
@@ -128,6 +135,31 @@ Future<Map<String, Object?>?> accRow(int id) async {
   return r.isEmpty ? null : r.first;
 }
 
+// إرسال ملف أو صورة مباشرة لمحادثة العميل في واتساب (كود أندرويد أصلي)، وإلا قائمة المشاركة
+const _chan = MethodChannel('acc/share');
+
+Future<bool> _waDirect(String phone, String path, String mime, String text) async {
+  try {
+    final r = await _chan.invokeMethod<bool>('shareToWhatsApp',
+        {'phone': digits(phone), 'path': path, 'mime': mime, 'text': text});
+    return r == true;
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<void> sendFileWa(
+    BuildContext context, String phone, String path, String mime, String text) async {
+  var ok = false;
+  if (phone.trim().isNotEmpty) ok = await _waDirect(phone, path, mime, text);
+  if (ok) return;
+  try {
+    await Share.shareXFiles([XFile(path, mimeType: mime)], text: text.isEmpty ? null : text);
+  } catch (_) {
+    if (context.mounted) snack(context, 'تعذر مشاركة الملف');
+  }
+}
+
 class _ResumeObserver with WidgetsBindingObserver {
   final VoidCallback f;
   _ResumeObserver(this.f);
@@ -151,10 +183,10 @@ Future<void> _waitResume() {
   });
 }
 
-// ---------- صورة الإشعار ----------
+// ---------- بطاقة الإشعار (صورة) ----------
 
 class NoticeData {
-  final String app, title, no, date, name, headline, balance;
+  final String app, title, no, date, name, headline, balance, closing;
   final List<List<String>> rows;
   final bool red;
   NoticeData({
@@ -165,16 +197,16 @@ class NoticeData {
     required this.name,
     required this.headline,
     required this.balance,
+    required this.closing,
     required this.rows,
     required this.red,
   });
 }
 
 NoticeData cardFor(String kind, Map<String, String> v) {
-  final now = DateTime.now();
-  final date =
-      '${dmy(now)}  ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
   final note = v['note'] ?? '';
+  final date = v['date'] ?? dt12(DateTime.now());
+  final close = v['close'] ?? '';
   switch (kind) {
     case 'voucher_dr':
       return NoticeData(
@@ -186,6 +218,7 @@ NoticeData cardFor(String kind, Map<String, String> v) {
           headline: 'عليكم مبلغ ${v['amount']}',
           rows: [if (note.isNotEmpty) ['البيان', note]],
           balance: v['balance']!,
+          closing: close,
           red: true);
     case 'voucher_cr':
       return NoticeData(
@@ -197,6 +230,7 @@ NoticeData cardFor(String kind, Map<String, String> v) {
           headline: 'لكم مبلغ ${v['amount']}',
           rows: [if (note.isNotEmpty) ['البيان', note]],
           balance: v['balance']!,
+          closing: close,
           red: false);
     case 'invoice':
       return NoticeData(
@@ -210,6 +244,7 @@ NoticeData cardFor(String kind, Map<String, String> v) {
             ['المتبقي', v['rest'] ?? '']
           ],
           balance: v['balance']!,
+          closing: close,
           red: true);
     default:
       return NoticeData(
@@ -218,9 +253,10 @@ NoticeData cardFor(String kind, Map<String, String> v) {
           no: '',
           date: date,
           name: v['name']!,
-          headline: 'نرجو المراجعة والتسديد',
+          headline: 'الرصيد المستحق',
           rows: [],
           balance: v['balance']!,
+          closing: close,
           red: true);
   }
 }
@@ -232,73 +268,88 @@ class NoticeCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accent = d.red ? const Color(0xFFC62828) : const Color(0xFF2E7D32);
-    return Container(
-      width: 340,
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: blue, width: 2)),
-      child: DefaultTextStyle(
-        style: const TextStyle(color: Colors.black87, fontSize: 14),
-        child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Container(
-                color: blue,
-                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
-                child: Column(children: [
-                  Text(d.app,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                          color: Colors.white, fontSize: 19, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 2),
-                  Text(d.title,
-                      style: const TextStyle(color: Colors.white, fontSize: 15)),
-                ]),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(14),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                    Text(d.no.isEmpty ? '' : 'رقم: ${d.no}'),
-                    Text(d.date),
-                  ]),
-                  const Divider(),
-                  Text('الأخ / ${d.name}',
-                      style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 12),
+    return Theme(
+      data: ThemeData.light(),
+      child: Directionality(
+        textDirection: TextDirection.rtl,
+        child: Container(
+          width: 340,
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: blue, width: 2)),
+          child: DefaultTextStyle(
+            style: const TextStyle(color: Color(0xFF1B1F2A), fontSize: 14),
+            child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-                    decoration: BoxDecoration(
-                        color: accent.withOpacity(0.08),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: accent)),
-                    child: Text(d.headline,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                            color: accent, fontSize: 20, fontWeight: FontWeight.bold)),
+                    color: blue,
+                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+                    child: Column(children: [
+                      Text(d.app,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 20, fontWeight: FontWeight.w900)),
+                      const SizedBox(height: 2),
+                      Text(d.title, style: const TextStyle(color: Colors.white70, fontSize: 15)),
+                    ]),
                   ),
-                  for (final r in d.rows)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text('${r[0]}: ', style: const TextStyle(fontWeight: FontWeight.bold)),
-                        Expanded(child: Text(r[1])),
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                        Text(d.no.isEmpty ? '' : 'رقم: ${d.no}'),
+                        Text(d.date, style: const TextStyle(fontSize: 12.5)),
                       ]),
-                    ),
-                  const Divider(height: 22),
-                  Text('الرصيد ${d.balance}',
-                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 18),
-                  const Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                    Text('المحاسب: ________'),
-                    Text('المستلم: ________'),
-                  ]),
+                      const Divider(),
+                      Text('الأخ / ${d.name}',
+                          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 12),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+                        decoration: BoxDecoration(
+                            color: accent.withValues(alpha: .08),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: accent)),
+                        child: Text(d.headline,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                                color: accent, fontSize: 20, fontWeight: FontWeight.w800)),
+                      ),
+                      for (final r in d.rows)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text('${r[0]}: ',
+                                style: const TextStyle(fontWeight: FontWeight.bold)),
+                            Expanded(child: Text(r[1])),
+                          ]),
+                        ),
+                      const Divider(height: 24),
+                      Text('الرصيد ${d.balance}',
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                      if (d.closing.isNotEmpty) ...[
+                        const SizedBox(height: 14),
+                        Center(
+                            child: Text(d.closing,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                    fontSize: 15.5, fontWeight: FontWeight.w700))),
+                      ],
+                      const SizedBox(height: 16),
+                      const Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                        Text('المحاسب: ________'),
+                        Text('المستلم: ________'),
+                      ]),
+                    ]),
+                  ),
                 ]),
-              ),
-            ]),
+          ),
+        ),
       ),
     );
   }
@@ -345,9 +396,7 @@ class _CaptureDialogState extends State<_CaptureDialog> {
           child: RepaintBoundary(
             key: key,
             child: Container(
-                color: Colors.white,
-                padding: const EdgeInsets.all(10),
-                child: widget.child),
+                color: Colors.white, padding: const EdgeInsets.all(10), child: widget.child),
           ),
         ),
       );
@@ -360,18 +409,12 @@ Future<String?> renderCard(BuildContext context, NoticeData d) => showDialog<Str
 
 // ---------- الإرسال ----------
 
-Future<void> sendNotice(BuildContext context, Map<String, Object?> a, String kind,
-    Map<String, String> vars) async {
+// يرسل حسب قنوات الحساب: SMS نص، وواتساب صورة مباشرة لرقم العميل
+Future<void> sendVia(BuildContext context, Map<String, Object?> a, String text,
+    Future<String?> Function() makeImage) async {
   final phone = ((a['phone'] ?? '') as String).trim();
   var ch = channelsOf(a);
   if (ch.isEmpty) ch = {'sms'};
-  final v = {
-    ...vars,
-    'app': await appName(),
-    'name': a['name'] as String,
-    'date': dmy(DateTime.now()),
-  };
-  final text = fill(await getTpl(kind), v);
   var first = true;
   for (final c in ['sms', 'wa']) {
     if (!ch.contains(c)) continue;
@@ -379,20 +422,36 @@ Future<void> sendNotice(BuildContext context, Map<String, Object?> a, String kin
     first = false;
     if (!context.mounted) return;
     if (c == 'sms') {
-      final ok = await sendMsg('sms', phone, text);
-      if (!ok && context.mounted) snack(context, 'تعذر فتح تطبيق الرسائل');
-    } else {
-      final path = await renderCard(context, cardFor(kind, v));
-      var ok = false;
-      if (path != null) {
-        try {
-          await Share.shareXFiles([XFile(path)]);
-          ok = true;
-        } catch (_) {}
+      if (phone.isEmpty) {
+        await Clipboard.setData(ClipboardData(text: text));
+        if (context.mounted) snack(context, 'لا يوجد رقم تلفون، تم نسخ النص');
+      } else {
+        final ok = await sendMsg('sms', phone, text);
+        if (!ok && context.mounted) snack(context, 'تعذر فتح تطبيق الرسائل');
       }
-      if (!ok) await sendMsg('wa', phone, text);
+    } else {
+      final path = await makeImage();
+      if (!context.mounted) return;
+      if (path != null) {
+        await sendFileWa(context, phone, path, 'image/png', '');
+      } else if (phone.isNotEmpty) {
+        await sendMsg('wa', phone, text);
+      }
     }
   }
+}
+
+Future<void> sendNotice(BuildContext context, Map<String, Object?> a, String kind,
+    Map<String, String> vars) async {
+  final v = {
+    ...vars,
+    'app': await appName(),
+    'name': a['name'] as String,
+    'date': dt12(DateTime.now()),
+  };
+  final text = fill(await getTpl(kind), v);
+  if (!context.mounted) return;
+  await sendVia(context, a, text, () => renderCard(context, cardFor(kind, v)));
 }
 
 // زر الرسالة في بطاقة الحساب وفي أرصدة الحسابات
@@ -404,8 +463,10 @@ Future<void> sendBalanceMsg(BuildContext context, int id) async {
     return;
   }
   final bal = (await balances())[id];
+  final owe = (bal ?? <int, double>{}).values.any((v) => v > 0.005);
+  final close = await closeFor(owe);
   if (!context.mounted) return;
-  await sendNotice(context, a, 'balance', {'balance': balAll(bal)});
+  await sendNotice(context, a, 'balance', {'balance': balAll(bal), 'close': close});
 }
 
 // بعد حفظ سند أو فاتورة: حسب إعداد الحساب (لا ترسل / بعد التأكيد / تلقائي)
@@ -425,8 +486,13 @@ Future<void> afterSave(
   final bal = (await balances())[id];
   final cur = int.tryParse(vars['cur'] ?? '');
   var k = kind;
-  if (kind == 'voucher') k = vars['side'] == 'عليكم' ? 'voucher_dr' : 'voucher_cr';
-  final v = {...vars};
+  var close = '';
+  if (kind == 'voucher') {
+    final owe = vars['side'] == 'عليكم';
+    k = owe ? 'voucher_dr' : 'voucher_cr';
+    close = await closeFor(owe);
+  }
+  final v = {...vars, 'close': close};
   v['amount'] = pm(vars['amount'] ?? '');
   if (vars.containsKey('rest')) v['rest'] = pm(vars['rest']!);
   v['balance'] = cur != null ? balIn(bal, cur) : balAll(bal);
@@ -434,21 +500,7 @@ Future<void> afterSave(
   await sendNotice(context, a, k, v);
 }
 
-// إرسال نص حر (كشف الحساب). بدون رقم: يُنسخ النص
-Future<void> sendText(BuildContext context, int id, String text) async {
-  final a = await accRow(id);
-  final phone = ((a?['phone'] ?? '') as String).trim();
-  if (a == null || phone.isEmpty) {
-    await Clipboard.setData(ClipboardData(text: text));
-    if (context.mounted) snack(context, 'لا يوجد رقم تلفون، تم نسخ النص');
-    return;
-  }
-  final app = channelsOf(a).contains('wa') ? 'wa' : 'sms';
-  final ok = await sendMsg(app, phone, text);
-  if (!ok && context.mounted) snack(context, 'تعذر فتح تطبيق الرسائل');
-}
-
-// ---------- شاشة الإعدادات ----------
+// ---------- شاشة قوالب الرسائل ----------
 
 class MessagesSettingsPage extends StatefulWidget {
   const MessagesSettingsPage({super.key});
@@ -458,7 +510,7 @@ class MessagesSettingsPage extends StatefulWidget {
 
 class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
   final cs = {for (final k in tplNames.keys) k: TextEditingController()};
-  final appC = TextEditingController();
+  final owe = TextEditingController(), paid = TextEditingController();
 
   @override
   void initState() {
@@ -467,7 +519,8 @@ class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
   }
 
   Future<void> load() async {
-    appC.text = await appName();
+    owe.text = await closeFor(true);
+    paid.text = await closeFor(false);
     for (final k in tplNames.keys) {
       cs[k]!.text = await getTpl(k);
     }
@@ -475,15 +528,17 @@ class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
   }
 
   Future<void> save() async {
-    final n = appC.text.trim();
-    await setSetting('app_name', n.isEmpty ? 'المحاسب' : n);
+    await setSetting('close_owe', owe.text);
+    await setSetting('close_paid', paid.text);
     for (final k in tplNames.keys) {
-      await setSetting('tpl_$k', cs[k]!.text);
+      await setSetting('tpl2_$k', cs[k]!.text);
     }
     if (mounted) snack(context, 'تم الحفظ');
   }
 
   void reset() {
+    owe.text = defCloseOwe;
+    paid.text = defClosePaid;
     for (final k in tplNames.keys) {
       cs[k]!.text = defTpl[k]!;
     }
@@ -492,28 +547,23 @@ class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('الرسائل والإشعارات')),
+        appBar: bar('قوالب الرسائل'),
         body: ListView(padding: const EdgeInsets.all(16), children: [
-          TextField(
-            controller: appC,
-            decoration: const InputDecoration(
-                labelText: 'اسم البرنامج / المحل (يظهر في الرسالة والصورة)',
-                border: OutlineInputBorder()),
-          ),
-          const SizedBox(height: 12),
+          gap(TextField(
+              controller: owe, decoration: deco('عبارة الختام عند "عليكم" (اشعار دائن)'))),
+          gap(TextField(
+              controller: paid, decoration: deco('عبارة الختام عند "لكم / واصل" (اشعار مدين)'))),
+          const SizedBox(height: 6),
           const Text(tplHelp, style: TextStyle(fontSize: 12, color: Colors.black54)),
           const SizedBox(height: 8),
           for (final k in tplNames.keys)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: TextField(
-                controller: cs[k],
-                maxLines: 7,
-                minLines: 4,
-                decoration: InputDecoration(
-                    labelText: tplNames[k], border: const OutlineInputBorder()),
-              ),
-            ),
+            gap(TextField(
+              controller: cs[k],
+              maxLines: 8,
+              minLines: 4,
+              decoration: deco(tplNames[k]!),
+            )),
+          const SizedBox(height: 8),
           Row(children: [
             Expanded(child: FilledButton(onPressed: save, child: const Text('حفظ'))),
             const SizedBox(width: 8),
