@@ -23,10 +23,116 @@ jobs:
       - name: Generate Android project
         run: |
           flutter create --platforms=android --project-name smart_accountant .
-          git checkout -- lib/main.dart pubspec.yaml
+          git checkout -- lib pubspec.yaml
 
-      - run: flutter pub get
-      - run: flutter build apk --release
+      - name: Add native WhatsApp helper
+        run: |
+          set -e
+          mkdir -p /tmp/bak
+          KT=$(find android/app/src/main -name MainActivity.kt | head -n 1)
+          MF=android/app/src/main/AndroidManifest.xml
+          cp "$KT" /tmp/bak/MainActivity.kt
+          cp "$MF" /tmp/bak/AndroidManifest.xml
+          for f in build.gradle build.gradle.kts; do
+            if [ -f "android/app/$f" ]; then cp "android/app/$f" "/tmp/bak/$f"; fi
+          done
+          PKG=$(grep -m1 '^package ' "$KT")
+          echo "$PKG" > "$KT"
+          cat >> "$KT" <<'EOF'
+
+          import android.content.ClipData
+          import android.content.Intent
+          import androidx.core.content.FileProvider
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+          import java.io.File
+
+          class MainActivity : FlutterActivity() {
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "acc/share")
+                      .setMethodCallHandler { call, result ->
+                          if (call.method != "shareToWhatsApp") {
+                              result.notImplemented()
+                              return@setMethodCallHandler
+                          }
+                          try {
+                              val path = call.argument<String>("path") ?: ""
+                              val phone = call.argument<String>("phone") ?: ""
+                              val mime = call.argument<String>("mime") ?: "image/png"
+                              val text = call.argument<String>("text") ?: ""
+                              var pkg: String? = null
+                              for (p in listOf("com.whatsapp", "com.whatsapp.w4b")) {
+                                  try {
+                                      packageManager.getPackageInfo(p, 0)
+                                      pkg = p
+                                      break
+                                  } catch (e: Exception) {
+                                  }
+                              }
+                              if (pkg == null) {
+                                  result.success(false)
+                                  return@setMethodCallHandler
+                              }
+                              val uri = FileProvider.getUriForFile(this, "$packageName.accfiles", File(path))
+                              val i = Intent(Intent.ACTION_SEND)
+                              i.type = mime
+                              i.putExtra(Intent.EXTRA_STREAM, uri)
+                              if (text.isNotEmpty()) i.putExtra(Intent.EXTRA_TEXT, text)
+                              i.putExtra("jid", "$phone@s.whatsapp.net")
+                              i.setPackage(pkg)
+                              i.clipData = ClipData.newRawUri("", uri)
+                              i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                              grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                              startActivity(i)
+                              result.success(true)
+                          } catch (e: Exception) {
+                              result.success(false)
+                          }
+                      }
+              }
+          }
+          EOF
+          mkdir -p android/app/src/main/res/xml
+          cat > android/app/src/main/res/xml/acc_file_paths.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <cache-path name="cache" path="." />
+              <files-path name="files" path="." />
+          </paths>
+          EOF
+          python3 - <<'PY'
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p, encoding='utf-8').read()
+          prov = '<provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.accfiles" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/acc_file_paths"/></provider>'
+          s = s.replace('</application>', prov + '</application>', 1)
+          pk = '<package android:name="com.whatsapp"/><package android:name="com.whatsapp.w4b"/>'
+          if '<queries>' in s:
+              s = s.replace('<queries>', '<queries>' + pk, 1)
+          else:
+              s = s.replace('<application', '<queries>' + pk + '</queries><application', 1)
+          open(p, 'w', encoding='utf-8').write(s)
+          PY
+          for f in build.gradle build.gradle.kts; do
+            if [ -f "android/app/$f" ]; then
+              printf '\ndependencies {\n    implementation("androidx.core:core-ktx:1.12.0")\n}\n' >> "android/app/$f"
+            fi
+          done
+
+      - name: Build APK
+        run: |
+          flutter pub get
+          if ! flutter build apk --release; then
+            echo "::warning::Native helper failed, rebuilding without it"
+            KT=$(find android/app/src/main -name MainActivity.kt | head -n 1)
+            cp /tmp/bak/MainActivity.kt "$KT"
+            cp /tmp/bak/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+            for f in build.gradle build.gradle.kts; do
+              if [ -f "/tmp/bak/$f" ]; then cp "/tmp/bak/$f" "android/app/$f"; fi
+            done
+            flutter build apk --release
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
