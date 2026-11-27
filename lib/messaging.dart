@@ -1,8 +1,5 @@
 import 'dart:async';
-import 'dart:io';
-import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:sqflite/sqflite.dart';
@@ -18,11 +15,11 @@ const tplNames = {
 
 const defTpl = {
   'voucher_dr':
-      'اشعار دائن\n{app}\nعليكم مبلغ {amount}\n{note}\nالرصيد {balance}\n{date}\n{close}',
+      'اشعار دائن\n{app}\nعليكم مبلغ {amount}\n{note}\nالرصيد {balance}\nسند رقم {no}\n{date}\n{close}',
   'voucher_cr':
-      'اشعار مدين\n{app}\nلكم مبلغ {amount}\n{note}\nالرصيد {balance}\n{date}\n{close}',
+      'اشعار مدين\n{app}\nلكم مبلغ {amount}\n{note}\nالرصيد {balance}\nسند رقم {no}\n{date}\n{close}',
   'invoice':
-      '{app}\n{kind} رقم {no}\nحساب: {name}\nالإجمالي: {amount}\nالمتبقي: {rest}\nالرصيد {balance}\n{date}',
+      '{app}\n{kind} رقم {no}\nحساب: {name}\n{items}\n{discount}\nالإجمالي: {amount}\n{paid}\nالمتبقي: {rest}\nالرصيد {balance}\n{date}',
   'balance': '{app}\nحساب: {name}\nالرصيد {balance}\n{date}\n{close}',
 };
 
@@ -30,7 +27,7 @@ const defCloseOwe = 'نرجو المراجعة والتسديد 😊';
 const defClosePaid = 'شكراً على حسن تعاملكم 😘';
 
 const tplHelp =
-    '{app} اسم المحل   {name} اسم الحساب   {amount} المبلغ   {note} البيان   {balance} الرصيد   {date} التاريخ والوقت   {close} عبارة الختام   {kind} نوع الفاتورة   {no} الرقم   {rest} المتبقي';
+    '{app} اسم المحل   {name} اسم الحساب   {amount} المبلغ   {note} البيان   {balance} الرصيد   {date} التاريخ والوقت   {close} عبارة الختام   {kind} نوع الفاتورة   {no} الرقم   {items} أصناف الفاتورة   {discount} الخصم   {paid} الواصل   {rest} المتبقي';
 
 // ---------- الإعدادات ----------
 
@@ -48,10 +45,18 @@ Future<void> setSetting(String k, String v) async {
   await db.insert('settings', {'k': k, 'v': v}, conflictAlgorithm: ConflictAlgorithm.replace);
 }
 
-Future<String> getTpl(String k) => getSetting('tpl2_$k', defTpl[k]!);
+Future<String> getTpl(String k) => getSetting('tpl3_$k', defTpl[k]!);
 Future<String> appName() => getSetting('app_name', 'المحاسب');
 Future<String> closeFor(bool owe) =>
     getSetting(owe ? 'close_owe' : 'close_paid', owe ? defCloseOwe : defClosePaid);
+
+// مفتاح الدولة لأرقام واتساب
+String waCc = '967';
+
+Future<void> loadCc() async {
+  final v = (await getSetting('country_code', '967')).replaceAll(RegExp(r'[^0-9]'), '');
+  waCc = v.isEmpty ? '967' : v;
+}
 
 // ---------- تنسيق ----------
 
@@ -98,10 +103,16 @@ String fill(String tpl, Map<String, String> vars) {
   return s.split('\n').where((l) => l.trim().isNotEmpty).join('\n');
 }
 
+// يحوّل أي صيغة رقم إلى الصيغة الدولية بدون + أو أصفار
 String digits(String s) {
   var d = s.replaceAll(RegExp(r'[^0-9]'), '');
-  // جوال يمني من 9 خانات يبدأ بـ 7: نضيف مفتاح الدولة
-  if (d.length == 9 && d.startsWith('7')) d = '967$d';
+  if (d.startsWith('00')) {
+    d = d.substring(2);
+  } else if (d.startsWith('0')) {
+    d = waCc + d.replaceFirst(RegExp(r'^0+'), '');
+  } else if (!(d.startsWith(waCc) && d.length >= waCc.length + 8)) {
+    d = waCc + d;
+  }
   return d;
 }
 
@@ -135,7 +146,7 @@ Future<Map<String, Object?>?> accRow(int id) async {
   return r.isEmpty ? null : r.first;
 }
 
-// إرسال ملف أو صورة مباشرة لمحادثة العميل في واتساب (كود أندرويد أصلي)، وإلا قائمة المشاركة
+// إرسال ملف (PDF) مباشرة لمحادثة العميل في واتساب (كود أندرويد أصلي)، وإلا قائمة المشاركة
 const _chan = MethodChannel('acc/share');
 
 Future<bool> _waDirect(String phone, String path, String mime, String text) async {
@@ -183,235 +194,9 @@ Future<void> _waitResume() {
   });
 }
 
-// ---------- بطاقة الإشعار (صورة) ----------
+// ---------- الإرسال (نص لكل القنوات) ----------
 
-class NoticeData {
-  final String app, title, no, date, name, headline, balance, closing;
-  final List<List<String>> rows;
-  final bool red;
-  NoticeData({
-    required this.app,
-    required this.title,
-    required this.no,
-    required this.date,
-    required this.name,
-    required this.headline,
-    required this.balance,
-    required this.closing,
-    required this.rows,
-    required this.red,
-  });
-}
-
-NoticeData cardFor(String kind, Map<String, String> v) {
-  final note = v['note'] ?? '';
-  final date = v['date'] ?? dt12(DateTime.now());
-  final close = v['close'] ?? '';
-  switch (kind) {
-    case 'voucher_dr':
-      return NoticeData(
-          app: v['app']!,
-          title: 'اشعار دائن',
-          no: v['no'] ?? '',
-          date: date,
-          name: v['name']!,
-          headline: 'عليكم مبلغ ${v['amount']}',
-          rows: [if (note.isNotEmpty) ['البيان', note]],
-          balance: v['balance']!,
-          closing: close,
-          red: true);
-    case 'voucher_cr':
-      return NoticeData(
-          app: v['app']!,
-          title: 'اشعار مدين',
-          no: v['no'] ?? '',
-          date: date,
-          name: v['name']!,
-          headline: 'لكم مبلغ ${v['amount']}',
-          rows: [if (note.isNotEmpty) ['البيان', note]],
-          balance: v['balance']!,
-          closing: close,
-          red: false);
-    case 'invoice':
-      return NoticeData(
-          app: v['app']!,
-          title: '${v['kind']} رقم ${v['no']}',
-          no: v['no'] ?? '',
-          date: date,
-          name: v['name']!,
-          headline: 'الإجمالي ${v['amount']}',
-          rows: [
-            ['المتبقي', v['rest'] ?? '']
-          ],
-          balance: v['balance']!,
-          closing: close,
-          red: true);
-    default:
-      return NoticeData(
-          app: v['app']!,
-          title: 'كشف رصيد',
-          no: '',
-          date: date,
-          name: v['name']!,
-          headline: 'الرصيد المستحق',
-          rows: [],
-          balance: v['balance']!,
-          closing: close,
-          red: true);
-  }
-}
-
-class NoticeCard extends StatelessWidget {
-  final NoticeData d;
-  const NoticeCard(this.d, {super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = d.red ? const Color(0xFFC62828) : const Color(0xFF2E7D32);
-    return Theme(
-      data: ThemeData.light(),
-      child: Directionality(
-        textDirection: TextDirection.rtl,
-        child: Container(
-          width: 340,
-          clipBehavior: Clip.antiAlias,
-          decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: blue, width: 2)),
-          child: DefaultTextStyle(
-            style: const TextStyle(color: Color(0xFF1B1F2A), fontSize: 14),
-            child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Container(
-                    color: blue,
-                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
-                    child: Column(children: [
-                      Text(d.app,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 20, fontWeight: FontWeight.w900)),
-                      const SizedBox(height: 2),
-                      Text(d.title, style: const TextStyle(color: Colors.white70, fontSize: 15)),
-                    ]),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                        Text(d.no.isEmpty ? '' : 'رقم: ${d.no}'),
-                        Text(d.date, style: const TextStyle(fontSize: 12.5)),
-                      ]),
-                      const Divider(),
-                      Text('الأخ / ${d.name}',
-                          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
-                      const SizedBox(height: 12),
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
-                        decoration: BoxDecoration(
-                            color: accent.withValues(alpha: .08),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: accent)),
-                        child: Text(d.headline,
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                                color: accent, fontSize: 20, fontWeight: FontWeight.w800)),
-                      ),
-                      for (final r in d.rows)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Text('${r[0]}: ',
-                                style: const TextStyle(fontWeight: FontWeight.bold)),
-                            Expanded(child: Text(r[1])),
-                          ]),
-                        ),
-                      const Divider(height: 24),
-                      Text('الرصيد ${d.balance}',
-                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
-                      if (d.closing.isNotEmpty) ...[
-                        const SizedBox(height: 14),
-                        Center(
-                            child: Text(d.closing,
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                    fontSize: 15.5, fontWeight: FontWeight.w700))),
-                      ],
-                      const SizedBox(height: 16),
-                      const Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                        Text('المحاسب: ________'),
-                        Text('المستلم: ________'),
-                      ]),
-                    ]),
-                  ),
-                ]),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// يعرض البطاقة لحظة قصيرة ثم يلتقطها كصورة PNG
-class _CaptureDialog extends StatefulWidget {
-  final Widget child;
-  const _CaptureDialog(this.child);
-  @override
-  State<_CaptureDialog> createState() => _CaptureDialogState();
-}
-
-class _CaptureDialogState extends State<_CaptureDialog> {
-  final key = GlobalKey();
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => capture());
-  }
-
-  Future<void> capture() async {
-    await Future.delayed(const Duration(milliseconds: 350));
-    String? path;
-    try {
-      final b = key.currentContext!.findRenderObject() as RenderRepaintBoundary;
-      final img = await b.toImage(pixelRatio: 3);
-      final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
-      final f = File(
-          '${Directory.systemTemp.path}/notice_${DateTime.now().millisecondsSinceEpoch}.png');
-      await f.writeAsBytes(bytes!.buffer.asUint8List());
-      path = f.path;
-    } catch (_) {}
-    if (mounted) Navigator.pop(context, path);
-  }
-
-  @override
-  Widget build(BuildContext context) => Dialog(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        insetPadding: const EdgeInsets.all(12),
-        child: Center(
-          child: RepaintBoundary(
-            key: key,
-            child: Container(
-                color: Colors.white, padding: const EdgeInsets.all(10), child: widget.child),
-          ),
-        ),
-      );
-}
-
-Future<String?> renderCard(BuildContext context, NoticeData d) => showDialog<String>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => _CaptureDialog(NoticeCard(d)));
-
-// ---------- الإرسال ----------
-
-// يرسل حسب قنوات الحساب: SMS نص، وواتساب صورة مباشرة لرقم العميل
-Future<void> sendVia(BuildContext context, Map<String, Object?> a, String text,
-    Future<String?> Function() makeImage) async {
+Future<void> sendVia(BuildContext context, Map<String, Object?> a, String text) async {
   final phone = ((a['phone'] ?? '') as String).trim();
   var ch = channelsOf(a);
   if (ch.isEmpty) ch = {'sms'};
@@ -421,22 +206,14 @@ Future<void> sendVia(BuildContext context, Map<String, Object?> a, String text,
     if (!first) await _waitResume();
     first = false;
     if (!context.mounted) return;
-    if (c == 'sms') {
-      if (phone.isEmpty) {
-        await Clipboard.setData(ClipboardData(text: text));
-        if (context.mounted) snack(context, 'لا يوجد رقم تلفون، تم نسخ النص');
-      } else {
-        final ok = await sendMsg('sms', phone, text);
-        if (!ok && context.mounted) snack(context, 'تعذر فتح تطبيق الرسائل');
-      }
-    } else {
-      final path = await makeImage();
-      if (!context.mounted) return;
-      if (path != null) {
-        await sendFileWa(context, phone, path, 'image/png', '');
-      } else if (phone.isNotEmpty) {
-        await sendMsg('wa', phone, text);
-      }
+    if (phone.isEmpty) {
+      await Clipboard.setData(ClipboardData(text: text));
+      if (context.mounted) snack(context, 'لا يوجد رقم تلفون، تم نسخ النص');
+      return;
+    }
+    final ok = await sendMsg(c, phone, text);
+    if (!ok && context.mounted) {
+      snack(context, c == 'wa' ? 'تعذر فتح واتساب' : 'تعذر فتح تطبيق الرسائل');
     }
   }
 }
@@ -451,7 +228,7 @@ Future<void> sendNotice(BuildContext context, Map<String, Object?> a, String kin
   };
   final text = fill(await getTpl(kind), v);
   if (!context.mounted) return;
-  await sendVia(context, a, text, () => renderCard(context, cardFor(kind, v)));
+  await sendVia(context, a, text);
 }
 
 // زر الرسالة في بطاقة الحساب وفي أرصدة الحسابات
@@ -510,7 +287,9 @@ class MessagesSettingsPage extends StatefulWidget {
 
 class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
   final cs = {for (final k in tplNames.keys) k: TextEditingController()};
-  final owe = TextEditingController(), paid = TextEditingController();
+  final owe = TextEditingController(),
+      paid = TextEditingController(),
+      cc = TextEditingController();
 
   @override
   void initState() {
@@ -521,6 +300,7 @@ class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
   Future<void> load() async {
     owe.text = await closeFor(true);
     paid.text = await closeFor(false);
+    cc.text = await getSetting('country_code', '967');
     for (final k in tplNames.keys) {
       cs[k]!.text = await getTpl(k);
     }
@@ -530,8 +310,10 @@ class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
   Future<void> save() async {
     await setSetting('close_owe', owe.text);
     await setSetting('close_paid', paid.text);
+    await setSetting('country_code', cc.text.replaceAll(RegExp(r'[^0-9]'), ''));
+    await loadCc();
     for (final k in tplNames.keys) {
-      await setSetting('tpl2_$k', cs[k]!.text);
+      await setSetting('tpl3_$k', cs[k]!.text);
     }
     if (mounted) snack(context, 'تم الحفظ');
   }
@@ -549,6 +331,10 @@ class _MessagesSettingsPageState extends State<MessagesSettingsPage> {
   Widget build(BuildContext context) => Scaffold(
         appBar: bar('قوالب الرسائل'),
         body: ListView(padding: const EdgeInsets.all(16), children: [
+          gap(TextField(
+              controller: cc,
+              keyboardType: TextInputType.number,
+              decoration: deco('مفتاح الدولة لأرقام واتساب (اليمن 967)'))),
           gap(TextField(
               controller: owe, decoration: deco('عبارة الختام عند "عليكم" (اشعار دائن)'))),
           gap(TextField(
