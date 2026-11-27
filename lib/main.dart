@@ -4,22 +4,25 @@ import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 import 'extras.dart';
 import 'messaging.dart';
+import 'settings.dart';
+import 'statement_pdf.dart';
 
 late Database db;
 Map<int, Map<String, Object?>> curs = {};
 int defCur = 1;
+final themeMode = ValueNotifier<ThemeMode>(ThemeMode.light);
 
 const blue = Color(0xFF0B4DA2);
 const orange = Color(0xFFF59E0B);
 
 const cats = <String, List<Object>>{
-  'clients': ['العملاء', Icons.groups],
-  'suppliers': ['الموردين', Icons.local_shipping],
-  'employees': ['الموظفين', Icons.badge],
-  'debts': ['الديون', Icons.money_off],
-  'expenses': ['الصرفيات', Icons.payments],
-  'other': ['أخرى', Icons.shopping_cart],
-  'boxes': ['الصناديق', Icons.account_balance_wallet],
+  'clients': ['العملاء', Icons.groups_rounded, Color(0xFF1E6FD9)],
+  'suppliers': ['الموردين', Icons.local_shipping_rounded, Color(0xFF7B52D6)],
+  'employees': ['الموظفين', Icons.badge_rounded, Color(0xFF0E9F8E)],
+  'debts': ['الديون', Icons.money_off_rounded, Color(0xFFE5484D)],
+  'expenses': ['الصرفيات', Icons.payments_rounded, Color(0xFFF59E0B)],
+  'other': ['أخرى', Icons.category_rounded, Color(0xFF64748B)],
+  'boxes': ['الصناديق', Icons.account_balance_wallet_rounded, Color(0xFF16A34A)],
 };
 
 Future<void> main() async {
@@ -51,6 +54,8 @@ Future<void> main() async {
     },
   );
   await loadCurs();
+  final th = await getSetting('theme', 'light');
+  themeMode.value = th == 'dark' ? ThemeMode.dark : ThemeMode.light;
   runApp(const App());
 }
 
@@ -58,8 +63,18 @@ Future<void> main() async {
 // المبلغ الموجب = مدين (عليه / وارد للصندوق)، السالب = دائن (له / منصرف)
 
 String nowIso() => DateTime.now().toIso8601String();
-String d10(String iso) => iso.substring(0, 10);
 String dmy(DateTime d) => '${d.day}/${d.month}/${d.year}';
+
+// وقت بنظام 12 ساعة
+String t12(DateTime d) {
+  final h = d.hour % 12 == 0 ? 12 : d.hour % 12;
+  return '$h:${d.minute.toString().padLeft(2, '0')} ${d.hour < 12 ? 'AM' : 'PM'}';
+}
+
+String dt12(DateTime d) => '${dmy(d)} ${t12(d)}';
+
+// تاريخ + وقت 12 ساعة (الاسم قديم وتستخدمه ملفات أخرى)
+String d10(String iso) => dt12(DateTime.parse(iso));
 
 Future<void> loadCurs() async {
   final r = await db.query('currencies', orderBy: 'id');
@@ -173,15 +188,80 @@ Future<List<String>?> ask(BuildContext context, String title, List<String> label
   );
 }
 
+// ---------- عناصر الواجهة ----------
+
+InputDecoration deco(String l) => InputDecoration(
+    labelText: l,
+    filled: true,
+    border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none));
+
+AppBar bar(String t, {List<Widget>? actions}) => AppBar(
+    title: Text(t),
+    centerTitle: true,
+    backgroundColor: Colors.transparent,
+    scrolledUnderElevation: 0,
+    actions: actions);
+
+Widget gap(Widget w) => Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: w);
+
+Widget tile(
+        {required Widget child,
+        VoidCallback? onTap,
+        EdgeInsets margin = const EdgeInsets.symmetric(horizontal: 14, vertical: 6)}) =>
+    Card(
+        elevation: 0,
+        margin: margin,
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: InkWell(onTap: onTap, child: child));
+
+Widget pill(String t, Color c) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+    decoration:
+        BoxDecoration(color: c.withValues(alpha: .12), borderRadius: BorderRadius.circular(20)),
+    child: Text(t,
+        style: TextStyle(color: c, fontWeight: FontWeight.w700, fontSize: 12.5)));
+
+class Avatar extends StatelessWidget {
+  final String name;
+  final Color? color;
+  const Avatar(this.name, {super.key, this.color});
+  @override
+  Widget build(BuildContext context) {
+    final c = color ?? blue;
+    return CircleAvatar(
+        radius: 22,
+        backgroundColor: c.withValues(alpha: .14),
+        child: Text(name.isEmpty ? '?' : name.substring(0, 1),
+            style: TextStyle(color: c, fontWeight: FontWeight.bold, fontSize: 18)));
+  }
+}
+
+ThemeData buildTheme(Brightness b) => ThemeData(
+      useMaterial3: true,
+      colorScheme: ColorScheme.fromSeed(seedColor: blue, brightness: b),
+      filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+              minimumSize: const Size(0, 50),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)))),
+      chipTheme: const ChipThemeData(shape: StadiumBorder(), side: BorderSide.none),
+      floatingActionButtonTheme: const FloatingActionButtonThemeData(shape: StadiumBorder()),
+    );
+
 class App extends StatelessWidget {
   const App({super.key});
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'المحاسب',
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData(colorSchemeSeed: blue, useMaterial3: true),
-        builder: (c, w) => Directionality(textDirection: TextDirection.rtl, child: w!),
-        home: const Home(),
+  Widget build(BuildContext context) => ValueListenableBuilder<ThemeMode>(
+        valueListenable: themeMode,
+        builder: (c, m, _) => MaterialApp(
+          title: 'المحاسب',
+          debugShowCheckedModeBanner: false,
+          themeMode: m,
+          theme: buildTheme(Brightness.light),
+          darkTheme: buildTheme(Brightness.dark),
+          builder: (c, w) => Directionality(textDirection: TextDirection.rtl, child: w!),
+          home: const Home(),
+        ),
       );
 }
 
@@ -195,6 +275,8 @@ class Home extends StatefulWidget {
 
 class _HomeState extends State<Home> {
   Map<String, Map<int, double>> totals = {};
+  double cash = 0, owed = 0, owe = 0;
+  String shop = 'المحاسب';
 
   @override
   void initState() {
@@ -211,7 +293,30 @@ class _HomeState extends State<Home> {
       t.putIfAbsent(x['cat'] as String, () => <int, double>{})[x['cur'] as int] =
           (x['s'] as num).toDouble();
     }
-    setState(() => totals = t);
+    final accts = await db.query('accounts', columns: ['id', 'cat']);
+    final bal = await balances();
+    double c = 0, o = 0, w = 0;
+    for (final a in accts) {
+      final double b = bal[a['id'] as int]?[defCur] ?? 0;
+      final cat = a['cat'] as String;
+      if (cat == 'system') continue;
+      if (cat == 'boxes') {
+        c += b;
+      } else if (b > 0) {
+        o += b;
+      } else {
+        w += -b;
+      }
+    }
+    final s = await appName();
+    if (!mounted) return;
+    setState(() {
+      totals = t;
+      cash = c;
+      owed = o;
+      owe = w;
+      shop = s;
+    });
   }
 
   Future<void> go(Widget page) async {
@@ -220,59 +325,131 @@ class _HomeState extends State<Home> {
     load();
   }
 
-  Widget quick(String t, Widget page, [Color c = blue]) => ElevatedButton(
-        style: ElevatedButton.styleFrom(backgroundColor: c, foregroundColor: Colors.white),
-        onPressed: () => go(page),
-        child: Text(t),
+  Widget stat(String t, double v, Color c) => Column(children: [
+        Text(t, style: const TextStyle(color: Colors.white70, fontSize: 12.5)),
+        const SizedBox(height: 4),
+        Text('${nf(v)} ${sym(defCur)}',
+            style: TextStyle(color: c, fontSize: 17, fontWeight: FontWeight.w800)),
+      ]);
+
+  Widget action(IconData ic, String t, Widget page, Color c) => Padding(
+        padding: const EdgeInsetsDirectional.only(end: 12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: () => go(page),
+          child: SizedBox(
+              width: 76,
+              child: Column(children: [
+                Container(
+                    width: 56,
+                    height: 56,
+                    decoration: BoxDecoration(
+                        color: c.withValues(alpha: .13), borderRadius: BorderRadius.circular(18)),
+                    child: Icon(ic, color: c, size: 28)),
+                const SizedBox(height: 6),
+                Text(t,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+              ])),
+        ),
       );
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(
-            title: const Text('المحاسب'), backgroundColor: blue, foregroundColor: Colors.white),
-        floatingActionButton: FloatingActionButton(
-            backgroundColor: orange,
+        appBar: bar(shop, actions: [
+          IconButton(
+              icon: const Icon(Icons.settings_rounded),
+              onPressed: () => go(const SettingsPage())),
+        ]),
+        floatingActionButton: FloatingActionButton.extended(
             onPressed: () => go(const VoucherPage()),
-            child: const Icon(Icons.add)),
-        body: ListView(padding: const EdgeInsets.all(12), children: [
-          Wrap(spacing: 8, runSpacing: 8, children: [
-            quick('سند جديد', const VoucherPage()),
-            quick('كشف حساب', const PickAccountPage()),
-            quick('الحركة اليومية', const DailyPage(), orange),
-            quick('العملات', const CurrenciesPage(), orange),
-            quick('فاتورة جديدة', const InvoicePage()),
-            quick('الفواتير', const InvoicesPage()),
-            quick('أرصدة الحسابات', const BalancesPage(), orange),
-            quick('الرسائل', const MessagesSettingsPage(), orange),
-          ]),
-          const SizedBox(height: 12),
+            icon: const Icon(Icons.add_rounded),
+            label: const Text('سند جديد')),
+        body: ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 100), children: [
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                    colors: [Color(0xFF0B4DA2), Color(0xFF2B7BE4)],
+                    begin: Alignment.topRight,
+                    end: Alignment.bottomLeft),
+                borderRadius: BorderRadius.circular(26),
+                boxShadow: [
+                  BoxShadow(
+                      color: blue.withValues(alpha: .28), blurRadius: 18, offset: const Offset(0, 8))
+                ]),
+            child: Column(children: [
+              const Text('السيولة النقدية',
+                  style: TextStyle(color: Colors.white70, fontSize: 13.5)),
+              const SizedBox(height: 4),
+              Text('${nf(cash)} ${sym(defCur)}',
+                  style: const TextStyle(
+                      color: Colors.white, fontSize: 30, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 16),
+              Row(children: [
+                Expanded(child: stat('مستحقات لنا', owed, const Color(0xFF9BF0B8))),
+                Container(width: 1, height: 36, color: Colors.white24),
+                Expanded(child: stat('مستحقات علينا', owe, const Color(0xFFFFD08A))),
+              ]),
+            ]),
+          ),
+          const SizedBox(height: 18),
+          SizedBox(
+              height: 104,
+              child: ListView(scrollDirection: Axis.horizontal, children: [
+                action(Icons.receipt_long_rounded, 'سند جديد', const VoucherPage(), blue),
+                action(Icons.description_rounded, 'فاتورة جديدة', const InvoicePage(),
+                    const Color(0xFF0E9F8E)),
+                action(Icons.article_rounded, 'كشف حساب', const PickAccountPage(),
+                    const Color(0xFF7B52D6)),
+                action(Icons.folder_rounded, 'الفواتير', const InvoicesPage(), orange),
+                action(Icons.account_balance_rounded, 'الأرصدة', const BalancesPage(),
+                    const Color(0xFFE5484D)),
+                action(Icons.today_rounded, 'الحركة اليومية', const DailyPage(),
+                    const Color(0xFF64748B)),
+              ])),
+          const SizedBox(height: 10),
+          const Text('الحسابات', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 10),
           GridView.count(
             crossAxisCount: 2,
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
             mainAxisSpacing: 12,
             crossAxisSpacing: 12,
-            childAspectRatio: 1.15,
+            childAspectRatio: 1.05,
             children: cats.entries.map((e) {
               final box = e.key == 'boxes';
-              return InkWell(
+              final col = e.value[2] as Color;
+              return tile(
+                margin: EdgeInsets.zero,
                 onTap: () => go(AccountsPage(e.key)),
-                child: Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                      border: Border.all(color: blue, width: 2),
-                      borderRadius: BorderRadius.circular(12)),
-                  child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    Icon(e.value[1] as IconData, size: 34, color: blue),
-                    Text(e.value[0] as String,
-                        style: const TextStyle(fontWeight: FontWeight.bold, color: blue)),
-                    Text(balText(totals[e.key], box: box),
-                        textAlign: TextAlign.center,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                            fontSize: 12, color: box ? Colors.green.shade700 : Colors.red)),
-                  ]),
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Container(
+                            width: 46,
+                            height: 46,
+                            decoration: BoxDecoration(
+                                color: col.withValues(alpha: .14), shape: BoxShape.circle),
+                            child: Icon(e.value[1] as IconData, color: col)),
+                        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(e.value[0] as String,
+                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                          const SizedBox(height: 4),
+                          Text(balText(totals[e.key], box: box),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: box ? Colors.green.shade700 : Colors.red)),
+                        ]),
+                      ]),
                 ),
               );
             }).toList(),
@@ -354,47 +531,46 @@ class _AccountFormPageState extends State<AccountFormPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: Text(widget.acc == null ? 'إضافة جديد' : 'تعديل')),
+        appBar: bar(widget.acc == null ? 'إضافة جديد' : 'تعديل'),
         body: ListView(padding: const EdgeInsets.all(16), children: [
-          TextField(controller: nameC, decoration: const InputDecoration(labelText: 'الاسم')),
+          gap(TextField(controller: nameC, decoration: deco('الاسم'))),
           if (!isBox) ...[
-            TextField(
+            gap(TextField(
                 controller: phoneC,
                 keyboardType: TextInputType.phone,
-                decoration: const InputDecoration(labelText: 'رقم التلفون')),
-            TextField(
+                decoration: deco('رقم التلفون'))),
+            gap(TextField(
                 controller: ceilC,
                 keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: 'سقف المديونية (اختياري)')),
+                decoration: deco('سقف المديونية (اختياري)'))),
           ],
-          TextField(controller: noteC, decoration: const InputDecoration(labelText: 'ملاحظة')),
+          gap(TextField(controller: noteC, decoration: deco('ملاحظة'))),
           if (!isBox)
-            DropdownButtonFormField<int?>(
+            gap(DropdownButtonFormField<int?>(
               value: boxes.any((b) => b['id'] == box) ? box : null,
-              decoration: const InputDecoration(labelText: 'الصندوق الافتراضي'),
+              decoration: deco('الصندوق الافتراضي'),
               items: [
                 const DropdownMenuItem<int?>(value: null, child: Text('بدون')),
                 ...boxes.map((b) => DropdownMenuItem<int?>(
                     value: b['id'] as int, child: Text(b['name'] as String))),
               ],
               onChanged: (v) => setState(() => box = v),
-            ),
+            )),
           if (!isBox) ...[
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             const Text('إرسال الإشعارات عبر (اختر واحداً أو الاثنين)'),
-            Wrap(spacing: 8, children: [
+            gap(Wrap(spacing: 8, children: [
               FilterChip(
                   label: const Text('SMS'),
                   selected: ch.contains('sms'),
                   onSelected: (v) => setState(() => v ? ch.add('sms') : ch.remove('sms'))),
               FilterChip(
-                  label: const Text('واتساب (صورة)'),
+                  label: const Text('واتساب'),
                   selected: ch.contains('wa'),
                   onSelected: (v) => setState(() => v ? ch.add('wa') : ch.remove('wa'))),
-            ]),
-            const SizedBox(height: 12),
+            ])),
             const Text('وقت الإرسال'),
-            SegmentedButton<String>(
+            gap(SegmentedButton<String>(
               segments: const [
                 ButtonSegment(value: 'auto', label: Text('تلقائي')),
                 ButtonSegment(value: 'confirm', label: Text('بعد التأكيد')),
@@ -402,17 +578,17 @@ class _AccountFormPageState extends State<AccountFormPage> {
               ],
               selected: {mode},
               onSelectionChanged: (s) => setState(() => mode = s.first),
-            ),
+            )),
           ],
           if (widget.acc == null) ...[
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             const Text('رصيد افتتاحي'),
-            Row(children: [
+            gap(Row(children: [
               Expanded(
                   child: TextField(
                       controller: openC,
                       keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(labelText: 'المبلغ'))),
+                      decoration: deco('المبلغ'))),
               const SizedBox(width: 8),
               DropdownButton<int>(
                 value: cur,
@@ -421,7 +597,7 @@ class _AccountFormPageState extends State<AccountFormPage> {
                     .toList(),
                 onChanged: (v) => setState(() => cur = v!),
               ),
-            ]),
+            ])),
             if (!isBox)
               SegmentedButton<bool>(
                 segments: const [
@@ -474,45 +650,51 @@ class _AccountsPageState extends State<AccountsPage> {
 
   Widget card(Map<String, Object?> r) {
     final id = r['id'] as int;
+    final name = r['name'] as String;
     final phone = (r['phone'] ?? '') as String;
     final ceil = (r['ceiling'] as num?)?.toDouble();
     final m = bal[id];
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      child: Column(children: [
-        ListTile(
-          title: Text(r['name'] as String, style: const TextStyle(fontWeight: FontWeight.bold)),
-          subtitle: Text([
-            if (phone.isNotEmpty) phone,
-            if (ceil != null && ceil > 0) 'السقف: ${ceil.toStringAsFixed(0)}',
-          ].join('   ')),
-          trailing: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 150),
-            child: Text(balText(m, box: isBox),
-                textAlign: TextAlign.end,
-                style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: isBox ? Colors.green.shade700 : balColor(m))),
-          ),
-          onTap: () => open(StatementPage(id, r['name'] as String, widget.cat)),
-        ),
-        Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-          IconButton(
-              icon: const Icon(Icons.edit, color: blue),
-              onPressed: () => open(AccountFormPage(widget.cat, acc: r))),
-          if (!isBox) ...[
-            IconButton(
-                icon: const Icon(Icons.call, color: blue),
-                onPressed: phone.isEmpty ? null : () => callPhone(phone)),
-            IconButton(
-                icon: const Icon(Icons.message, color: blue),
-                onPressed: phone.isEmpty ? null : () => sendBalanceMsg(context, id)),
-          ],
-          IconButton(
-              icon: const Icon(Icons.add_circle, color: blue),
-              onPressed: () => open(VoucherPage(acct0: id))),
+    final col = cats[widget.cat]![2] as Color;
+    final sub = [
+      if (phone.isNotEmpty) phone,
+      if (ceil != null && ceil > 0) 'السقف ${nf(ceil)}',
+    ].join('  •  ');
+    return tile(
+      onTap: () => open(StatementPage(id, name, widget.cat)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(children: [
+          Row(children: [
+            Avatar(name, color: col),
+            const SizedBox(width: 12),
+            Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              if (sub.isNotEmpty)
+                Text(sub,
+                    style: TextStyle(fontSize: 12.5, color: Theme.of(context).hintColor)),
+            ])),
+            pill(balText(m, box: isBox), isBox ? Colors.green.shade700 : balColor(m)),
+          ]),
+          const SizedBox(height: 10),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+            IconButton.filledTonal(
+                icon: const Icon(Icons.edit_rounded),
+                onPressed: () => open(AccountFormPage(widget.cat, acc: r))),
+            if (!isBox) ...[
+              IconButton.filledTonal(
+                  icon: const Icon(Icons.call_rounded),
+                  onPressed: phone.isEmpty ? null : () => callPhone(phone)),
+              IconButton.filledTonal(
+                  icon: const Icon(Icons.send_rounded),
+                  onPressed: phone.isEmpty ? null : () => sendBalanceMsg(context, id)),
+            ],
+            IconButton.filledTonal(
+                icon: const Icon(Icons.add_rounded),
+                onPressed: () => open(VoucherPage(acct0: id))),
+          ]),
         ]),
-      ]),
+      ),
     );
   }
 
@@ -528,15 +710,19 @@ class _AccountsPageState extends State<AccountsPage> {
     }
     final ids = {...dr.keys, ...cr.keys};
     final lines = ids.map((c) => isBox
-        ? 'الإجمالي ${sym(c)}: ${((dr[c] ?? 0) - (cr[c] ?? 0)).toStringAsFixed(2)}'
-        : '${sym(c)}   عليه: ${(dr[c] ?? 0).toStringAsFixed(2)}   له: ${(cr[c] ?? 0).toStringAsFixed(2)}');
-    return Container(
-      color: blue,
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      child: Text(lines.isEmpty ? 'لا توجد أرصدة' : lines.join('\n'),
-          textAlign: TextAlign.center,
-          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        ? 'الإجمالي ${nf((dr[c] ?? 0) - (cr[c] ?? 0))} ${sym(c)}'
+        : '${sym(c)}   عليه ${nf(dr[c] ?? 0)}   •   له ${nf(cr[c] ?? 0)}');
+    return SafeArea(
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+        padding: const EdgeInsets.all(14),
+        width: double.infinity,
+        decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.primaryContainer,
+            borderRadius: BorderRadius.circular(18)),
+        child: Text(lines.isEmpty ? 'لا توجد أرصدة' : lines.join('\n'),
+            textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.w700)),
+      ),
     );
   }
 
@@ -544,22 +730,22 @@ class _AccountsPageState extends State<AccountsPage> {
   Widget build(BuildContext context) {
     final l = rows.where((r) => (r['name'] as String).contains(q)).toList();
     return Scaffold(
-      appBar: AppBar(title: Text(cats[widget.cat]![0] as String)),
+      appBar: bar(cats[widget.cat]![0] as String),
       floatingActionButton: FloatingActionButton(
-          onPressed: () => open(AccountFormPage(widget.cat)), child: const Icon(Icons.add)),
+          onPressed: () => open(AccountFormPage(widget.cat)),
+          child: const Icon(Icons.add_rounded)),
       bottomNavigationBar: footer(l),
       body: Column(children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+          padding: const EdgeInsets.fromLTRB(14, 4, 14, 6),
           child: TextField(
               onChanged: (v) => setState(() => q = v),
-              decoration:
-                  const InputDecoration(prefixIcon: Icon(Icons.search), hintText: 'بحث بالاسم')),
+              decoration: deco('بحث بالاسم').copyWith(prefixIcon: const Icon(Icons.search_rounded))),
         ),
         Expanded(
             child: l.isEmpty
                 ? const Center(child: Text('لا توجد حسابات، اضغط + للإضافة'))
-                : ListView(children: l.map(card).toList())),
+                : ListView(padding: const EdgeInsets.only(bottom: 90), children: l.map(card).toList())),
       ]),
     );
   }
@@ -642,7 +828,7 @@ class _VoucherPageState extends State<VoucherPage> {
     }
     final r = find(acct)!;
     final ceil = (r['ceiling'] as num?)?.toDouble();
-    final b = bal[acct]?[defCur] ?? 0;
+    final double b = bal[acct]?[defCur] ?? 0;
     if (cur == defCur && onHim && !isBox && ceil != null && ceil > 0 && b + a > ceil) {
       final ok = await confirm(context, 'تجاوز سقف المديونية',
           'السقف ${ceil.toStringAsFixed(2)} والرصيد بعد السند ${(b + a).toStringAsFixed(2)}. هل تريد المتابعة؟');
@@ -651,9 +837,7 @@ class _VoucherPageState extends State<VoucherPage> {
     final rate = cur == defCur ? 1.0 : (double.tryParse(rateC.text) ?? 1.0);
     final nt = note.text.trim().isNotEmpty
         ? note.text.trim()
-        : (isBox
-            ? ''
-            : (onHim ? 'باقي حساب ${r['name']}' : 'واصل باقي حساب ${r['name']}'));
+        : (isBox ? '' : (onHim ? 'باقي حساب ${r['name']}' : 'واصل باقي حساب ${r['name']}'));
     final docId = await postDoc('voucher', nt, [
       Ln(acct!, cur, onHim ? a : -a, rate),
       Ln(counter!, cur, onHim ? -a : a, rate),
@@ -675,11 +859,11 @@ class _VoucherPageState extends State<VoucherPage> {
   Widget build(BuildContext context) {
     final r = find(acct);
     return Scaffold(
-      appBar: AppBar(title: const Text('سند جديد')),
+      appBar: bar('سند جديد'),
       body: ListView(padding: const EdgeInsets.all(16), children: [
-        DropdownButtonFormField<int>(
+        gap(DropdownButtonFormField<int>(
           value: acct,
-          decoration: const InputDecoration(labelText: 'الحساب'),
+          decoration: deco('الحساب'),
           items: accts
               .map((a) => DropdownMenuItem(value: a['id'] as int, child: Text(label(a))))
               .toList(),
@@ -687,36 +871,37 @@ class _VoucherPageState extends State<VoucherPage> {
             acct = v;
             pickCounter();
           }),
-        ),
+        )),
         if (r != null)
           Container(
-            margin: const EdgeInsets.symmetric(vertical: 8),
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(color: orange, borderRadius: BorderRadius.circular(20)),
+            margin: const EdgeInsets.symmetric(vertical: 6),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+                color: orange.withValues(alpha: .16), borderRadius: BorderRadius.circular(16)),
             child: Text('الرصيد الحالي: ${balText(bal[acct], box: isBox)}',
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                style: const TextStyle(fontWeight: FontWeight.w800)),
           ),
-        SegmentedButton<bool>(
+        gap(SegmentedButton<bool>(
           segments: [
             ButtonSegment(value: true, label: Text(isBox ? 'وارد' : 'عليه')),
             ButtonSegment(value: false, label: Text(isBox ? 'منصرف' : 'له')),
           ],
           selected: {onHim},
           onSelectionChanged: (s) => setState(() => onHim = s.first),
-        ),
-        DropdownButtonFormField<int>(
+        )),
+        gap(DropdownButtonFormField<int>(
           value: accts.any((a) => a['id'] == counter && a['id'] != acct) ? counter : null,
-          decoration: const InputDecoration(labelText: 'الطرف المقابل (صندوق أو حساب)'),
+          decoration: deco('الطرف المقابل (صندوق أو حساب)'),
           items: accts
               .where((a) => a['id'] != acct)
               .map((a) => DropdownMenuItem(value: a['id'] as int, child: Text(label(a))))
               .toList(),
           onChanged: (v) => setState(() => counter = v),
-        ),
-        DropdownButtonFormField<int>(
+        )),
+        gap(DropdownButtonFormField<int>(
           value: cur,
-          decoration: const InputDecoration(labelText: 'العملة'),
+          decoration: deco('العملة'),
           items: curs.entries
               .map((e) => DropdownMenuItem(
                   value: e.key, child: Text('${e.value['name']} (${e.value['symbol']})')))
@@ -725,21 +910,17 @@ class _VoucherPageState extends State<VoucherPage> {
             cur = v!;
             rateC.text = cur == defCur ? '' : '${curs[cur]!['sell']}';
           }),
-        ),
+        )),
         if (cur != defCur)
-          TextField(
+          gap(TextField(
               controller: rateC,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'سعر الصرف')),
-        TextField(
-            controller: amount,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: 'المبلغ')),
-        TextField(
-            controller: note,
-            decoration: const InputDecoration(
-                labelText: 'البيان (إذا تركته فارغاً يُكتب تلقائياً)')),
-        const SizedBox(height: 20),
+              decoration: deco('سعر الصرف'))),
+        gap(TextField(
+            controller: amount, keyboardType: TextInputType.number, decoration: deco('المبلغ'))),
+        gap(TextField(
+            controller: note, decoration: deco('البيان (إذا تركته فارغاً يُكتب تلقائياً)'))),
+        const SizedBox(height: 16),
         FilledButton(onPressed: save, child: const Text('حفظ')),
       ]),
     );
@@ -759,6 +940,7 @@ class StatementPage extends StatefulWidget {
 class _StatementPageState extends State<StatementPage> {
   List<Map<String, Object?>> all = [];
   Map<int, double> totalBal = {};
+  Map<String, Object?>? acc;
   int cur = defCur;
   String period = 'all';
   DateTime? from, to;
@@ -790,8 +972,11 @@ class _StatementPageState extends State<StatementPage> {
     final tb = await db.rawQuery(
         'SELECT currency_id, SUM(amount) AS s FROM lines WHERE account_id=? GROUP BY currency_id',
         [widget.id]);
+    final a = await accRow(widget.id);
+    if (!mounted) return;
     setState(() {
       all = rows;
+      acc = a;
       totalBal = {
         for (final x in tb) x['currency_id'] as int: (x['s'] as num).toDouble()
       };
@@ -862,6 +1047,7 @@ class _StatementPageState extends State<StatementPage> {
       bals.add(run);
     }
     final b = StringBuffer('كشف حساب: ${widget.name}\n');
+    if (from != null) b.write('الفترة: ${dmy(from!)} - ${dmy(to ?? DateTime.now())}\n');
     final start = rows.length > 30 ? rows.length - 30 : 0;
     for (var i = start; i < rows.length; i++) {
       final a = (rows[i]['amount'] as num).toDouble();
@@ -870,6 +1056,33 @@ class _StatementPageState extends State<StatementPage> {
     }
     b.write('الرصيد الحالي: ${balMsg(totalBal)}');
     return b.toString();
+  }
+
+  Future<void> sendStatement({bool forcePdf = false}) async {
+    final a = acc;
+    if (a == null) return;
+    final phone = ((a['phone'] ?? '') as String).trim();
+    final daily =
+        period == 'day' || (from != null && to != null && DateUtils.isSameDay(from, to));
+    final rows = shown;
+    final pv = prev;
+    if (daily && !forcePdf) {
+      await sendVia(
+          context,
+          a,
+          stText(),
+          () => statementImage(context,
+              customer: widget.name, cur: cur, from: from, to: to, prev: pv, rows: rows));
+    } else {
+      final path = await statementPdf(context,
+          customer: widget.name, cur: cur, from: from, to: to, prev: pv, rows: rows);
+      if (!mounted) return;
+      if (path == null) {
+        snack(context, 'تعذر تجهيز الملف');
+        return;
+      }
+      await sendFileWa(context, phone, path, 'application/pdf', 'كشف حساب ${widget.name}');
+    }
   }
 
   Future<void> open(Widget page) async {
@@ -908,8 +1121,40 @@ class _StatementPageState extends State<StatementPage> {
   Widget chip(String label, String p) => ChoiceChip(
       label: Text(label), selected: period == p, onSelected: (_) => setPeriod(p));
 
+  Widget rowTile(Map<String, Object?> r, double b, String inW, String outW) {
+    final a = (r['amount'] as num).toDouble();
+    final isIn = a > 0;
+    final c = (isIn == isBox) ? Colors.green.shade700 : Colors.red;
+    final txt = [r['other'], r['note']]
+        .where((e) => e != null && '$e'.isNotEmpty)
+        .join('  ');
+    return tile(
+      margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+      child: ListTile(
+        isThreeLine: true,
+        leading: CircleAvatar(
+            backgroundColor: c.withValues(alpha: .12),
+            child: Icon(isIn ? Icons.south_west_rounded : Icons.north_east_rounded,
+                color: c, size: 20)),
+        title: Text('${isIn ? inW : outW}  ${nf(a.abs())} ${sym(cur)}',
+            style: TextStyle(fontWeight: FontWeight.w800, color: c)),
+        subtitle: Text(
+            [d10(r['date'] as String), if (txt.isNotEmpty) txt, 'الرصيد ${nf(b)} ${sym(cur)}']
+                .join('\n')),
+        trailing: PopupMenuButton<String>(
+          onSelected: (v) => v == 'e' ? edit(r) : del(r),
+          itemBuilder: (_) => const [
+            PopupMenuItem(value: 'e', child: Text('تعديل')),
+            PopupMenuItem(value: 'd', child: Text('حذف')),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     final rows = shown;
     var run = prevBal ? prev : 0.0;
     final bals = <double>[];
@@ -922,33 +1167,43 @@ class _StatementPageState extends State<StatementPage> {
       if (a < 0) credit += -a;
     }
     final endBal = (prevBal ? prev : 0.0) + debit - credit;
+    final inW = isBox ? 'وارد' : 'عليه';
+    final outW = isBox ? 'منصرف' : 'له';
     return Scaffold(
-      appBar: AppBar(title: Text(widget.name), actions: [
-        IconButton(
-            icon: const Icon(Icons.copy),
-            onPressed: () {
+      appBar: bar(widget.name, actions: [
+        PopupMenuButton<String>(
+          icon: const Icon(Icons.more_vert_rounded),
+          onSelected: (v) {
+            if (v == 'send') sendStatement();
+            if (v == 'pdf') sendStatement(forcePdf: true);
+            if (v == 'copy') {
               Clipboard.setData(ClipboardData(text: stText()));
               snack(context, 'تم نسخ الكشف');
-            }),
-        if (!isBox)
-          IconButton(
-              icon: const Icon(Icons.share),
-              onPressed: () => sendText(context, widget.id, stText())),
+            }
+          },
+          itemBuilder: (_) => const [
+            PopupMenuItem(value: 'send', child: Text('إرسال للعميل')),
+            PopupMenuItem(value: 'pdf', child: Text('كشف PDF')),
+            PopupMenuItem(value: 'copy', child: Text('نسخ كنص')),
+          ],
+        ),
       ]),
       bottomNavigationBar: SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            color: blue,
-            width: double.infinity,
-            padding: const EdgeInsets.all(10),
-            child: Text(
-                '${isBox ? 'وارد' : 'عليه'}: ${debit.toStringAsFixed(2)}   ${isBox ? 'منصرف' : 'له'}: ${credit.toStringAsFixed(2)}   الرصيد: ${endBal.toStringAsFixed(2)} ${sym(cur)}',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(8),
-            child: Row(children: [
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                  color: cs.primaryContainer, borderRadius: BorderRadius.circular(16)),
+              child: Text(
+                  '$inW ${nf(debit)}   •   $outW ${nf(credit)}   •   الرصيد ${nf(endBal)} ${sym(cur)}',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontWeight: FontWeight.w800)),
+            ),
+            const SizedBox(height: 8),
+            Row(children: [
               Expanded(
                   child: FilledButton(
                       onPressed: () => open(VoucherPage(acct0: widget.id, onHim0: isBox)),
@@ -960,18 +1215,26 @@ class _StatementPageState extends State<StatementPage> {
                       onPressed: () => open(VoucherPage(acct0: widget.id, onHim0: !isBox)),
                       child: Text(isBox ? 'إيداع' : 'سند عليه'))),
             ]),
-          ),
-        ]),
+          ]),
+        ),
       ),
       body: ListView(children: [
-        Container(
-          color: blue.withOpacity(0.08),
-          padding: const EdgeInsets.all(14),
-          child: Text('الرصيد الحالي: ${balText(totalBal, box: isBox)}',
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        tile(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(children: [
+              Avatar(widget.name, color: cats[widget.cat]?[2] as Color?),
+              const SizedBox(width: 12),
+              Expanded(
+                  child: Text(widget.name,
+                      style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
+              pill(balText(totalBal, box: isBox),
+                  isBox ? Colors.green.shade700 : balColor(totalBal)),
+            ]),
+          ),
         ),
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 14),
           child: Wrap(
               spacing: 8,
               children: curs.entries
@@ -985,7 +1248,7 @@ class _StatementPageState extends State<StatementPage> {
                   .toList()),
         ),
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          padding: const EdgeInsets.fromLTRB(14, 6, 14, 0),
           child: Wrap(spacing: 8, children: [
             chip('الكل', 'all'),
             chip('يومي', 'day'),
@@ -994,7 +1257,7 @@ class _StatementPageState extends State<StatementPage> {
           ]),
         ),
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          padding: const EdgeInsets.fromLTRB(14, 6, 14, 0),
           child: Row(children: [
             Expanded(
                 child: OutlinedButton(
@@ -1012,31 +1275,12 @@ class _StatementPageState extends State<StatementPage> {
           onChanged: (v) => setState(() => prevBal = v ?? false),
           title: Text(from == null
               ? 'رصيد سابق (حدد تاريخ البداية)'
-              : 'رصيد سابق: ${prev.toStringAsFixed(2)} ${sym(cur)}'),
+              : 'رصيد سابق: ${nf(prev)} ${sym(cur)}'),
         ),
-        for (var i = 0; i < rows.length; i++)
-          ListTile(
-            isThreeLine: true,
-            title: Text(
-              '${(rows[i]['amount'] as num) > 0 ? (isBox ? 'وارد' : 'عليه') : (isBox ? 'منصرف' : 'له')}  ${(rows[i]['amount'] as num).abs().toStringAsFixed(2)} ${sym(cur)}',
-              style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: ((rows[i]['amount'] as num) > 0) == isBox
-                      ? Colors.green.shade700
-                      : Colors.red),
-            ),
-            subtitle: Text(
-                '${d10(rows[i]['date'] as String)}  ${rows[i]['other'] ?? ''}  ${rows[i]['note'] ?? ''}\nالرصيد: ${bals[i].toStringAsFixed(2)}'),
-            trailing: PopupMenuButton<String>(
-              onSelected: (v) => v == 'e' ? edit(rows[i]) : del(rows[i]),
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'e', child: Text('تعديل')),
-                PopupMenuItem(value: 'd', child: Text('حذف')),
-              ],
-            ),
-          ),
+        for (var i = 0; i < rows.length; i++) rowTile(rows[i], bals[i], inW, outW),
         if (rows.isEmpty)
           const Padding(padding: EdgeInsets.all(24), child: Center(child: Text('لا توجد حركات'))),
+        const SizedBox(height: 12),
       ]),
     );
   }
@@ -1046,19 +1290,24 @@ class PickAccountPage extends StatelessWidget {
   const PickAccountPage({super.key});
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('اختر حساباً')),
+        appBar: bar('اختر حساباً'),
         body: FutureBuilder(
           future: db.query('accounts', where: "cat<>'system'", orderBy: 'name'),
           builder: (c, s) => ListView(
               children: (s.data ?? [])
-                  .map((r) => ListTile(
-                        title: Text(r['name'] as String),
-                        subtitle: Text('${cats[r['cat']]?[0] ?? ''}'),
+                  .map((r) => tile(
                         onTap: () => Navigator.push(
                             context,
                             MaterialPageRoute(
                                 builder: (_) => StatementPage(
                                     r['id'] as int, r['name'] as String, r['cat'] as String))),
+                        child: ListTile(
+                          leading: Avatar(r['name'] as String,
+                              color: cats[r['cat']]?[2] as Color?),
+                          title: Text(r['name'] as String,
+                              style: const TextStyle(fontWeight: FontWeight.w700)),
+                          subtitle: Text('${cats[r['cat']]?[0] ?? ''}'),
+                        ),
                       ))
                   .toList()),
         ),
@@ -1073,10 +1322,10 @@ class DailyPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final today = nowIso().substring(0, 10);
     return Scaffold(
-      appBar: AppBar(title: const Text('الحركة اليومية')),
+      appBar: bar('الحركة اليومية'),
       body: FutureBuilder(
         future: db.rawQuery(
-            'SELECT d.id AS id, d.note AS note, l1.amount AS amt, l1.currency_id AS cur, '
+            'SELECT d.id AS id, d.note AS note, d.date AS date, l1.amount AS amt, l1.currency_id AS cur, '
             'a1.name AS dn, a2.name AS cn FROM docs d '
             'JOIN lines l1 ON l1.doc_id=d.id AND l1.amount>0 '
             'JOIN accounts a1 ON a1.id=l1.account_id '
@@ -1089,73 +1338,20 @@ class DailyPage extends StatelessWidget {
           if (rows.isEmpty) return const Center(child: Text('لا توجد حركات اليوم'));
           return ListView(
               children: rows
-                  .map((r) => ListTile(
-                        title: Text('مدين: ${r['dn']}   |   دائن: ${r['cn']}'),
-                        subtitle: Text('${r['note'] ?? ''}'),
-                        trailing: Text(money((r['amt'] as num).toDouble(), r['cur'] as int)),
+                  .map((r) => tile(
+                        child: ListTile(
+                          isThreeLine: true,
+                          title: Text('مدين: ${r['dn']}   |   دائن: ${r['cn']}',
+                              style: const TextStyle(fontWeight: FontWeight.w700)),
+                          subtitle: Text(
+                              '${t12(DateTime.parse(r['date'] as String))}\n${r['note'] ?? ''}'),
+                          trailing: Text(money((r['amt'] as num).toDouble(), r['cur'] as int),
+                              style: const TextStyle(fontWeight: FontWeight.w800)),
+                        ),
                       ))
                   .toList());
         },
       ),
     );
   }
-}
-
-// ---------- العملات ----------
-
-class CurrenciesPage extends StatefulWidget {
-  const CurrenciesPage({super.key});
-  @override
-  State<CurrenciesPage> createState() => _CurrenciesPageState();
-}
-
-class _CurrenciesPageState extends State<CurrenciesPage> {
-  Future<void> reload() async {
-    await loadCurs();
-    setState(() {});
-  }
-
-  Future<void> add() async {
-    final v = await ask(context, 'عملة جديدة', ['الاسم', 'الرمز', 'سعر البيع', 'سعر الشراء']);
-    if (v == null || v[0].isEmpty) return;
-    await db.insert('currencies', {
-      'name': v[0],
-      'symbol': v[1],
-      'sell': double.tryParse(v[2]) ?? 1.0,
-      'buy': double.tryParse(v[3]) ?? 1.0,
-      'is_default': 0,
-    });
-    reload();
-  }
-
-  Future<void> editRates(Map<String, Object?> c) async {
-    final v = await ask(context, '${c['name']}', ['سعر البيع', 'سعر الشراء'],
-        ['${c['sell']}', '${c['buy']}']);
-    if (v == null) return;
-    await db.update(
-        'currencies',
-        {
-          'sell': double.tryParse(v[0]) ?? c['sell'],
-          'buy': double.tryParse(v[1]) ?? c['buy'],
-        },
-        where: 'id=?',
-        whereArgs: [c['id']]);
-    reload();
-  }
-
-  @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('العملات')),
-        floatingActionButton: FloatingActionButton(onPressed: add, child: const Icon(Icons.add)),
-        body: ListView(
-            children: curs.values
-                .map((c) => ListTile(
-                      title: Text('${c['name']} (${c['symbol']})'),
-                      subtitle: Text(
-                          'بيع: ${c['sell']}   شراء: ${c['buy']}  (بالعملة الافتراضية)'),
-                      trailing: c['is_default'] == 1 ? const Chip(label: Text('الافتراضية')) : null,
-                      onTap: c['is_default'] == 1 ? null : () => editRates(c),
-                    ))
-                .toList()),
-      );
 }
