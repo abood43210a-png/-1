@@ -54,6 +54,7 @@ Future<void> main() async {
     },
   );
   await loadCurs();
+  await loadCc();
   final th = await getSetting('theme', 'light');
   themeMode.value = th == 'dark' ? ThemeMode.dark : ThemeMode.light;
   runApp(const App());
@@ -1067,12 +1068,7 @@ class _StatementPageState extends State<StatementPage> {
     final rows = shown;
     final pv = prev;
     if (daily && !forcePdf) {
-      await sendVia(
-          context,
-          a,
-          stText(),
-          () => statementImage(context,
-              customer: widget.name, cur: cur, from: from, to: to, prev: pv, rows: rows));
+      await sendVia(context, a, stText());
     } else {
       final path = await statementPdf(context,
           customer: widget.name, cur: cur, from: from, to: to, prev: pv, rows: rows);
