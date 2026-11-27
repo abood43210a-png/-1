@@ -116,7 +116,7 @@ class _InvoicePageState extends State<InvoicePage> {
     final pr = parties.firstWhere((x) => x['id'] == partyId);
     final ceil = (pr['ceiling'] as num?)?.toDouble();
     if (sale && cur == defCur && ceil != null && ceil > 0) {
-      final b = (await balances())[partyId]?[defCur] ?? 0;
+      final double b = (await balances())[partyId]?[defCur] ?? 0;
       if (b + (n - pd) > ceil) {
         if (!mounted) return;
         final ok = await confirm(context, 'تجاوز سقف المديونية',
@@ -163,9 +163,18 @@ class _InvoicePageState extends State<InvoicePage> {
     });
     if (!mounted) return;
     snack(context, 'تم حفظ الفاتورة رقم $invId');
+    final lines = items
+        .map((r) =>
+            '• ${r.n.text.trim().isEmpty ? 'صنف' : r.n.text.trim()}  ${nf(double.tryParse(r.q.text) ?? 0)} × ${nf(double.tryParse(r.p.text) ?? 0)} = ${nf(r.total)}')
+        .join('\n');
+    final dsc = double.tryParse(disc.text) ?? 0;
     await afterSave(context, partyId, 'invoice', {
       'kind': sale ? 'فاتورة بيع' : 'فاتورة شراء',
       'no': '$invId',
+      'cur': '$cur',
+      'items': lines,
+      'discount': dsc > 0 ? 'الخصم: ${pm(money(dsc, cur))}' : '',
+      'paid': pd > 0 ? 'الواصل: ${pm(money(pd, cur))}' : '',
       'amount': money(n, cur),
       'rest': money(n - pd, cur),
     });
